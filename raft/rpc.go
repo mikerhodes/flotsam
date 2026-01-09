@@ -1,14 +1,20 @@
 package raft
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -16,22 +22,39 @@ type Term int64
 type ServerId int64
 type LogIndex int64
 
+// noVote is a sentinel server ID for state.votedFor, representing
+// no candidate has been voted on this term.
+const noVote = -1
+
 // ElectionResult represents whether this node won an election.
 // True if it did, false if it didn't.
 type ElectionResult bool
 
-type RaftState int
+type RaftRole int
 
 const (
-	RaftStateFollower  = 1
-	RaftStateCandidate = 2
-	RaftStateLeader    = 3
+	RaftRoleFollower  RaftRole = 1
+	RaftRoleCandidate RaftRole = 2
+	RaftRoleLeader    RaftRole = 3
 )
 
-// electionTimeout is the duration after which we call an election
-// if no RPCs have been received.
-const electionTimeout = 1 * time.Second
-const heartbeatDuration = electionTimeout / 2
+func (r RaftRole) String() string {
+	switch r {
+	case RaftRoleFollower:
+		return "RaftRoleFollower"
+	case RaftRoleCandidate:
+		return "RaftRoleCandidate"
+	case RaftRoleLeader:
+		return "RaftRoleLeader"
+	default:
+		return fmt.Sprintf("RaftRole(%d)", r)
+	}
+}
+
+// Election deadlines set to now + (electionTimeoutBase + rand(electionPerturbation))
+const electionTimeoutBase = 150 * time.Millisecond
+const electionPerturbation = 150 * time.Millisecond
+const heartbeatDuration = electionPerturbation / 2
 
 type LogEntry struct{}
 
@@ -59,15 +82,16 @@ type RequestVoteRes struct {
 	VoteGranted bool
 }
 
-type RaftServer struct {
-	// Raft state
-	state RaftState
+type state struct {
+	sync.Mutex
+
+	// Raft role
+	role RaftRole
 
 	// Persistent state
 	currentTerm Term
-	votedFor    *ServerId
+	votedFor    ServerId
 	log         []LogEntry
-	serverId    ServerId
 
 	// Volatile state
 	commitIndex LogIndex
@@ -77,262 +101,350 @@ type RaftServer struct {
 	nextIndex  map[ServerId]LogIndex
 	matchIndex map[ServerId]LogIndex
 
-	// Other state
-	stop             chan struct{}
-	appendEntries    chan *AppendEntriesReq
-	requestVote      chan *RequestVoteReq
-	peers            []net.Addr
 	electionDeadline time.Time
+	nextHeartbeat    time.Time
+
+	peers []net.Addr
 }
 
-func NewRaftServer() *RaftServer {
-	return &RaftServer{
-		state:            RaftStateFollower,
-		currentTerm:      0,
-		votedFor:         nil,
-		log:              []LogEntry{},
-		serverId:         0,
-		commitIndex:      0,
-		lastApplied:      0,
-		nextIndex:        map[ServerId]LogIndex{},
-		matchIndex:       map[ServerId]LogIndex{},
-		stop:             make(chan struct{}),
-		appendEntries:    make(chan *AppendEntriesReq),
-		requestVote:      make(chan *RequestVoteReq),
-		peers:            []net.Addr{},
-		electionDeadline: time.Now().Add(electionTimeout),
+type RaftServer struct {
+	state *state
+
+	// serverId is read-only server ID
+	serverId ServerId
+
+	// stop closes when we should stop
+	stop chan struct{}
+}
+
+func NewRaftServer(serverId ServerId) (*RaftServer, error) {
+	if serverId < 0 {
+		return nil, errors.New("serverId must be >0")
 	}
+	electionDeadline := newElectionDeadline()
+	nextHeartbeat := nextHeartbeat()
+	return &RaftServer{
+		state: &state{
+			role:             RaftRoleFollower,
+			currentTerm:      0,
+			votedFor:         noVote,
+			log:              []LogEntry{},
+			commitIndex:      0,
+			lastApplied:      0,
+			nextIndex:        map[ServerId]LogIndex{},
+			matchIndex:       map[ServerId]LogIndex{},
+			peers:            []net.Addr{},
+			electionDeadline: electionDeadline,
+			nextHeartbeat:    nextHeartbeat,
+		},
+		serverId: serverId,
+		stop:     make(chan struct{}),
+	}, nil
 }
 
+func nextHeartbeat() time.Time {
+	nextHeartbeat := time.Now().Add(50 * time.Millisecond)
+	return nextHeartbeat
+}
+
+func newElectionDeadline() time.Time {
+	perturbMs, _ := rand.Int(rand.Reader, big.NewInt(electionPerturbation.Milliseconds()))
+	deadline := time.Now().Add(electionTimeoutBase)
+	deadline = deadline.Add(time.Duration(perturbMs.Int64()) * time.Millisecond)
+	return deadline
+}
+
+// Start starts the Raft server, and blocks until it is shutdown.
 func (r *RaftServer) Start(l net.Listener) {
 	// Start our HTTP server for other servers
 	mux := http.NewServeMux()
-	mux.HandleFunc("/append_entries", func(w http.ResponseWriter, req *http.Request) {
-		req.Body.Close()
-		data, err := io.ReadAll(req.Body)
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		appendEntries := AppendEntriesReq{}
-		err = json.Unmarshal(data, &r)
-		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		r.appendEntries <- &appendEntries
-		response := AppendEntriesRes{
-			Term:    r.currentTerm,
-			Success: true,
-		}
-		data, err = json.Marshal(&response)
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		w.Write(data)
-	})
-	mux.HandleFunc("/request_vote", func(w http.ResponseWriter, req *http.Request) {
-		req.Body.Close()
-		data, err := io.ReadAll(req.Body)
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		requestVote := RequestVoteReq{}
-		err = json.Unmarshal(data, &r)
-		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-
-		r.requestVote <- &requestVote
-
-		// TODO do I do this if I'm a candidate? Do we need to do this only for
-		// follower state?
-		// TODO clearly there is some protection needed for state!
-		// At least currentTerm and votedFor are concurrently accessed
-		response := RequestVoteRes{
-			Term: r.currentTerm,
-		}
-
-		// handle vote
-		if requestVote.Term < r.currentTerm {
-			// Request is coming from candidate in out of date term
-			response.VoteGranted = false
-		} else if r.votedFor != nil && r.votedFor != &requestVote.CandidateId {
-			// We already voted this term for a different candidate
-			response.VoteGranted = false
-		} else if requestVote.LastLogTerm < r.currentTerm {
-			// Our log is newer than the candidate's
-			response.VoteGranted = false
-		} else if requestVote.LastLogIndex < r.lastApplied {
-			// Our log is newer than the candidate's
-			response.VoteGranted = false
-		} else {
-			// All conditions passed
-			response.VoteGranted = true
-		}
-
-		data, err = json.Marshal(&response)
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		w.Write(data)
-	})
+	mux.HandleFunc("/append_entries", r.appendEntriesRPC)
+	mux.HandleFunc("/request_vote", r.requestVoteRPC)
 	srv := &http.Server{
 		Handler:        mux,
 		ReadTimeout:    1 * time.Second,
 		WriteTimeout:   1 * time.Second,
 		MaxHeaderBytes: 1 << 20,
 	}
-	go func() {
+
+	wg := sync.WaitGroup{}
+
+	// Handle events based on state
+	wg.Go(func() {
 		if err := srv.Serve(l); err != nil {
-			log.Fatal("Error serving HTTP")
+			log.Printf("Error serving HTTP: %v", err)
 		}
-	}()
-	go func() {
+	})
+
+	// Election timeout and heartbeats
+	wg.Go(func() {
+		const checkInterval = 25 * time.Millisecond
+
+		t := time.NewTicker(checkInterval)
+		for {
+			select {
+			case <-r.stop:
+				return
+			case <-t.C:
+				r.maybeStartElection()
+				r.maybeSendHeartbeats()
+			}
+		}
+	})
+
+	// Handle shutdown
+	wg.Go(func() {
 		<-r.stop
 		if err := srv.Shutdown(context.Background()); err != nil {
 			log.Printf("HTTP server Shutdown: %v", err)
 		}
-	}()
+	})
 
-	// Start the Raft state machine
-	r.state = RaftStateFollower
-	go func() {
-		for {
-			// Check whether we should stop
-			select {
-			case <-r.stop:
-				return
-			default:
-				// continue
-			}
-
-			// Execute this state
-			switch r.state {
-			case RaftStateFollower:
-				r.runFollowerState()
-			case RaftStateCandidate:
-				r.runCandidateState()
-			case RaftStateLeader:
-				r.runLeaderState()
-			}
-		}
-	}()
+	wg.Wait()
 }
 
-func (r *RaftServer) Stop() {
+func (r *RaftServer) Shutdown() {
 	close(r.stop)
 }
 
-func (r *RaftServer) runFollowerState() {
-	ticker := time.NewTicker(5 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case appendEntry := <-r.appendEntries:
-			// assume heartbeat for now but reset election timer
-			r.currentTerm = appendEntry.Term
-			r.electionDeadline = time.Now().Add(electionTimeout)
-		case requestVote := <-r.requestVote:
-			// assume heartbeat for now but reset election timer
-			r.currentTerm = requestVote.Term
-			r.electionDeadline = time.Now().Add(electionTimeout)
-		case <-ticker.C:
-			if time.Now().After(r.electionDeadline) {
-				r.currentTerm += 1
-				r.state = RaftStateCandidate
-				return
-			}
-		case <-r.stop:
-			return
-		}
-	}
+// Role returns the current Raft role of this server.
+func (r *RaftServer) Role() RaftRole {
+	r.state.Lock()
+	defer r.state.Unlock()
+	return r.state.role
 }
 
-func (r *RaftServer) runCandidateState() {
-	// Loop until:
-	// - We win the election and become the leader
-	// - We learn of another leader via AppendEntry RPC
-	for {
-		r.stepCandidateState()
-		if r.state != RaftStateCandidate {
-			return
-		}
+func (r *RaftServer) appendEntriesRPC(w http.ResponseWriter, req *http.Request) {
+	defer req.Body.Close()
+	data, err := io.ReadAll(req.Body)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
+	appendEntries := AppendEntriesReq{}
+	err = json.Unmarshal(data, &r)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	response := r.processAppendEntriesRequest(&appendEntries)
+
+	data, err = json.Marshal(response)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.Write(data)
 }
 
-func (r *RaftServer) stepCandidateState() {
-	// ctx sets the timeout for the election
-	ctx, cancel := context.WithTimeout(context.Background(), heartbeatDuration)
-	defer cancel()
+func (r *RaftServer) processAppendEntriesRequest(appendEntries *AppendEntriesReq) *AppendEntriesRes {
+	r.state.Lock()
+	defer r.state.Unlock()
 
-	result := make(chan ElectionResult)
+	ct := r.state.currentTerm
+
+	// Out of date request
+	if appendEntries.Term < r.state.currentTerm {
+		return &AppendEntriesRes{Term: ct, Success: false}
+	}
+
+	// Request is for current term, bump election deadline
+	r.state.electionDeadline = newElectionDeadline()
+
+	// If we receive an AppendEntries with Term >= currentTerm,
+	// we are definitely not the leader for this term.
+	if appendEntries.Term >= r.state.currentTerm {
+		r.state.role = RaftRoleFollower
+	}
+	// If we have moved to a new term, clear our vote state
+	if appendEntries.Term > r.state.currentTerm {
+		r.state.votedFor = noVote
+	}
+	r.state.currentTerm = appendEntries.Term
+	return &AppendEntriesRes{Term: ct, Success: true}
+}
+
+func (r *RaftServer) requestVoteRPC(w http.ResponseWriter, req *http.Request) {
+	defer req.Body.Close()
+	data, err := io.ReadAll(req.Body)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	requestVote := RequestVoteReq{}
+	err = json.Unmarshal(data, &r)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	response := r.processRequestVote(&requestVote)
+
+	data, err = json.Marshal(&response)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.Write(data)
+}
+
+func (r *RaftServer) processRequestVote(requestVote *RequestVoteReq) *RequestVoteRes {
+	r.state.Lock()
+	defer r.state.Unlock()
+
+	ct := r.state.currentTerm
+
+	// Out of date request
+	if requestVote.Term < r.state.currentTerm {
+		return &RequestVoteRes{Term: ct, VoteGranted: false}
+	}
+
+	// If we are the leader for this term, we need to update the calling
+	// candidate with that fact.
+	if r.state.role == RaftRoleLeader && requestVote.Term == r.state.currentTerm {
+		return &RequestVoteRes{Term: ct, VoteGranted: false}
+	}
+
+	// Vote is for a newer term, move ourselves to that term and
+	// become a follower before processing. (section 5.1)
+	if requestVote.Term > r.state.currentTerm {
+		r.state.role = RaftRoleFollower
+		r.state.votedFor = noVote
+	}
+	r.state.currentTerm = requestVote.Term
+
+	// Only grant one vote per term (section 5.2)
+	if r.state.votedFor != noVote && r.state.votedFor != requestVote.CandidateId {
+		return &RequestVoteRes{Term: ct, VoteGranted: false}
+	}
+
+	// Section 5.4 safety property
+	if requestVote.LastLogTerm < r.state.currentTerm {
+		return &RequestVoteRes{Term: ct, VoteGranted: false}
+	}
+	if requestVote.LastLogIndex < r.state.lastApplied {
+		return &RequestVoteRes{Term: ct, VoteGranted: false}
+	}
+
+	return &RequestVoteRes{Term: ct, VoteGranted: true}
+}
+
+// maybeStartElection checks whether we are in the right state
+// to start an election --- not the leader, with an elapsed
+// election deadline --- and if so starts an election in a new
+// goroutine, so this method returns before the election is
+// complete.
+func (r *RaftServer) maybeStartElection() {
+	r.state.Lock()
+	defer r.state.Unlock()
+
+	if r.state.role == RaftRoleLeader {
+		return
+	}
+	if time.Now().Before(r.state.electionDeadline) {
+		return
+	}
+
+	// Transition to candidate
+	r.state.role = RaftRoleCandidate
+	r.state.currentTerm += 1
+	r.state.votedFor = r.serverId
+
+	newDeadline := newElectionDeadline()
 	go func() {
-		// For now we just go straight into another election.
-		time.Sleep(100 * time.Millisecond) // TODO we shouldn't really wait here, should wait on electionDeadline
-		result <- r.runElection(ctx)
+		ctx, cancel := context.WithDeadline(context.Background(), newDeadline)
+		defer cancel()
+		r.runElection(ctx)
 	}()
-
-	// Run the election.
-	// If we discover a new leader has already been chosen,
-	// become a follower and return.
-	// If we win, set our state to leader. Return.
-	// If we don't win, remain a candidate. Return.
-	// If the election times out, return and wait for next election.
-	for {
-		select {
-		case appendEntry := <-r.appendEntries:
-			// If we get AppendEntry during with term >= currentTerm,
-			// another candidate won the election.
-			// Back to state follower, discard election (will cancel context)
-			if appendEntry.Term > r.currentTerm {
-				r.state = RaftStateFollower
-				r.currentTerm = appendEntry.Term
-				r.electionDeadline = time.Now().Add(electionTimeout)
-				return
-			}
-		case won := <-result:
-			if won {
-				r.state = RaftStateLeader
-			}
-			return
-		case <-ctx.Done(): // election timed out
-			return
-		}
-	}
+	r.state.electionDeadline = newDeadline
 }
 
 // runElection runs a single election. We exit this function either as
 // follower, leader or still as a candidate. In the latter state, we
 // run another election.
-func (r *RaftServer) runElection(ctx context.Context) ElectionResult {
+func (r *RaftServer) runElection(ctx context.Context) {
+	r.state.Lock()
+	peers := slices.Clone(r.state.peers)
+	electionTerm := r.state.currentTerm
+	r.state.Unlock()
 
-	votes := make(chan bool, len(r.peers))
+	won := r.collectVotes(ctx, peers)
+
+	r.state.Lock()
+	defer r.state.Unlock()
+
+	// No longer a candidate
+	if r.state.role != RaftRoleCandidate {
+		return
+	}
+
+	// If time has moved on, discard the result of the election
+	if r.state.currentTerm > electionTerm {
+		return
+	}
+
+	// A bug, this should never happen, panic
+	if r.state.currentTerm < electionTerm {
+		panic("Term went backwards, this is a bug")
+	}
+
+	// Section 5.2 Once a candidate wins an election, it becomes leader.
+	// It then sends heartbeat messages to all of the other servers to
+	// establish its authority and prevent new elections.
+	if won {
+		r.state.role = RaftRoleLeader
+		r.state.nextHeartbeat = nextHeartbeat()
+		go r.sendLeaderHeartbeats()
+	}
+}
+
+// collectVotes sends peers vote requests, and returns true if this
+// node received a majority of votes.
+func (r *RaftServer) collectVotes(ctx context.Context, peers []net.Addr) ElectionResult {
+	votes := make(chan bool, len(peers))
 	votesForMe := 1 // vote for self
-	votesRequired := len(r.peers)/2 + 1
+	votesRequired := len(peers)/2 + 1
 
 	// Send RequestVote RPCs, ensuring timeout using ctx
-	for _, peer := range r.peers {
+	for _, peer := range peers {
 		go func() {
-			peerResult, err := r.requestVoteFromPeer(ctx, peer)
+			peerResult, err := r.makeRequestVoteRequest(ctx, peer)
 			if err != nil {
 				log.Printf("Error requesting vote from %s; assuming false vote: %v", peer, err)
 				votes <- false
-			} else {
-				votes <- peerResult
+				return
 			}
 
+			// Respond to result, which might indicate that time
+			// has moved forward.
+			r.state.Lock()
+			defer r.state.Unlock()
+
+			// Time has moved on and a new leader has arisen. Accept
+			// this and become a follower.
+			if peerResult.Term > r.state.currentTerm {
+				r.state.currentTerm = peerResult.Term
+				r.state.role = RaftRoleFollower
+				r.state.votedFor = noVote
+				votes <- false
+				return
+			}
+
+			// A result from the past, discard it.
+			if peerResult.Term < r.state.currentTerm {
+				votes <- false
+				return
+			}
+
+			// Peer is still in the same term, use its result.
+			votes <- peerResult.VoteGranted
 		}()
 	}
 
 	// Wait for enough responses to declare victory, or timeout,
 	// or we receive all responses but not enough to win.
-	for range len(r.peers) {
+	for range len(peers) {
 		select {
 		case v := <-votes:
 			if v {
@@ -348,11 +460,12 @@ func (r *RaftServer) runElection(ctx context.Context) ElectionResult {
 	}
 
 	// If we win the election, we will have returned during for loop
-	return false
+	return votesForMe >= votesRequired
 }
 
-// requestVoteFromPeer makes a HTTP request to peer asking for its vote in a leader election
-func (r *RaftServer) requestVoteFromPeer(ctx context.Context, peer net.Addr) (bool, error) {
+// makeRequestVoteRequest makes a request to peer asking for its vote
+// in a leader election, returning the peer's vote.
+func (r *RaftServer) makeRequestVoteRequest(ctx context.Context, peer net.Addr) (*RequestVoteRes, error) {
 	req, _ := http.NewRequestWithContext(
 		ctx,
 		"POST",
@@ -362,73 +475,112 @@ func (r *RaftServer) requestVoteFromPeer(ctx context.Context, peer net.Addr) (bo
 	req.Header.Add("Content-Type", "application/json")
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	defer res.Body.Close()
 	data, err := io.ReadAll(res.Body)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	result := &RequestVoteRes{}
 	err = json.Unmarshal(data, result)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	if result.VoteGranted && r.currentTerm == result.Term { // TODO is this right: currentTerm >= r.Term?
-		return true, nil
-	} else {
-		return false, nil
-	}
+	return result, nil
 }
 
-func (r *RaftServer) runLeaderState() {
-	// Send heartbeats to all peers to retain leadership
-	t := time.NewTicker(heartbeatDuration)
-	defer t.Stop()
+// maybeSendHeartbeats checks whether we are in the right state to
+// sent heartbeats --- we are the leader, and the next heartbeat
+// time has passed --- and starts a goroutine to send the heartbeats,
+// meaning that this method will return before heartbeats are complete.
+func (r *RaftServer) maybeSendHeartbeats() {
+	r.state.Lock()
+	defer r.state.Unlock()
 
-	for {
-		select {
-		case <-t.C:
-			r.leaderHeartbeat()
-		case appendEntry := <-r.appendEntries:
-			r.electionDeadline.Add(electionTimeout)
-			if r.currentTerm < appendEntry.Term {
-				r.state = RaftStateFollower // Do we need to append entries to log?
-				r.currentTerm = appendEntry.Term
-				return
-			}
-		case requestVote := <-r.requestVote:
-			r.electionDeadline.Add(electionTimeout)
-			if r.currentTerm < requestVote.Term {
-				r.state = RaftStateFollower
-				r.currentTerm = requestVote.Term
-				return
-			}
-		case <-r.stop:
-			return
-		}
+	if r.state.role != RaftRoleLeader {
+		return
 	}
+	if time.Now().Before(r.state.nextHeartbeat) {
+		return
+	}
+
+	go r.sendLeaderHeartbeats()
+	r.state.nextHeartbeat = nextHeartbeat()
 }
 
-// leaderHeartbeat sends a heartbeat to all peers
-func (r *RaftServer) leaderHeartbeat() {
+// sendLeaderHeartbeats sends a heartbeat to all peers, blocking on
+// until complete.
+func (r *RaftServer) sendLeaderHeartbeats() {
+	r.state.Lock()
+	data, err := json.Marshal(&AppendEntriesReq{
+		Term:         r.state.currentTerm,
+		LeaderId:     r.serverId,
+		PrevLogIndex: 0,
+		PrevLogTerm:  0,
+		Entries:      []LogEntry{},
+		LeaderCommit: 0,
+	})
+	if err != nil {
+		panic("Should never have un-marshal-able heartbeat body")
+	}
+	r.state.Unlock()
+
 	// ctx sets timeout for all requests
-	ctx, cancel := context.WithTimeout(context.Background(), heartbeatDuration/2)
+	ctx, cancel := context.WithTimeout(context.Background(), heartbeatDuration)
 	defer cancel()
-
-	for _, peer := range r.peers {
-		go func() {
-			req, _ := http.NewRequestWithContext(
-				ctx,
-				"POST",
-				fmt.Sprintf("http://%s/append_entries", peer.String()),
-				strings.NewReader("{}"),
-			)
-			req.Header.Add("Content-Type", "application/json")
-			// Fire and forget; will timeout
-			if _, err := http.DefaultClient.Do(req); err != nil {
-				log.Printf("Error sending heartbeat to %s", peer)
+	wg := sync.WaitGroup{}
+	for _, peer := range r.state.peers {
+		wg.Go(func() {
+			result, err := r.makeHeartbeatRequest(ctx, peer, data)
+			if err != nil {
+				log.Printf("Error sending heartbeat to %v: %v", peer, err)
+				return
 			}
-		}()
+
+			// Make any state updates based on the response.
+			r.state.Lock()
+			defer r.state.Unlock()
+
+			// Time has moved on, and another leader has likely
+			// arisen. Accept this, and become a follower. (section 5.1)
+			if result.Term > r.state.currentTerm {
+				r.state.role = RaftRoleFollower
+				r.state.votedFor = noVote
+			}
+		})
 	}
+	wg.Wait()
+}
+
+// makeHeartbeatRequest makes a heartbeat request to a peer, returning
+// the result.
+func (r *RaftServer) makeHeartbeatRequest(
+	ctx context.Context,
+	peer net.Addr,
+	bodyData []byte,
+) (*AppendEntriesRes, error) {
+	req, _ := http.NewRequestWithContext(
+		ctx,
+		"POST",
+		fmt.Sprintf("http://%s/append_entries", peer.String()),
+		bytes.NewReader(bodyData),
+	)
+	req.Header.Add("Content-Type", "application/json")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	data, err := io.ReadAll(res.Body)
+	if err != nil {
+		return nil, err
+	}
+	result := &AppendEntriesRes{}
+	err = json.Unmarshal(data, result)
+	if err != nil {
+		return nil, err
+	}
+
+	return result, nil
 }
