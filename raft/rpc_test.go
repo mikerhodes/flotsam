@@ -37,7 +37,7 @@ func (f *fakeListener) Addr() net.Addr {
 
 func TestSingleServerBecomesLeader(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		srv, err := NewRaftServer(1)
+		srv, err := NewRaftServer(1, []net.Addr{})
 		if err != nil {
 			t.Fatalf("NewRaftServer failed: %v", err)
 		}
@@ -67,4 +67,82 @@ func TestSingleServerBecomesLeader(t *testing.T) {
 		listener.Close()
 		synctest.Wait()
 	})
+}
+
+func TestThreeServersOneLeaderAtStartup(t *testing.T) {
+	// Generate the "template" for each raft server.
+	type Peer struct {
+		id       ServerId
+		listener net.Listener
+		addr     net.Addr
+	}
+	raftGroup := []Peer{}
+	for id := range 3 {
+		l, err := net.Listen("tcp", ":0")
+		if err != nil {
+			t.Fatalf("Couldn't open tcp listener: %v", err)
+		}
+		raftGroup = append(raftGroup, Peer{
+			id:       ServerId(id),
+			listener: l,
+			addr:     l.Addr(),
+		})
+	}
+
+	servers := []*RaftServer{}
+	for _, peer := range raftGroup {
+		peerAddrs := []net.Addr{}
+		for _, cp := range raftGroup {
+			if cp.id != peer.id {
+				peerAddrs = append(peerAddrs, cp.addr)
+			}
+		}
+
+		srv, err := NewRaftServer(peer.id, peerAddrs)
+		if err != nil {
+			t.Fatalf("NewRaftServer failed: %v", err)
+		}
+		go srv.Start(peer.listener)
+
+		servers = append(servers, srv)
+	}
+
+	// All servers should start as Followers
+	for id, srv := range servers {
+		if role := srv.Role(); role != RaftRoleFollower {
+			t.Errorf("srv[%d].Role() = %s, want RaftRoleFollower", id, role)
+		}
+	}
+
+	// Wait for election timeout (150-300ms) plus some buffer
+	time.Sleep(350 * time.Millisecond)
+
+	// Two servers should be followers, one should be leader
+	leaders, followers, candidates := 0, 0, 0
+	for _, srv := range servers {
+		switch srv.Role() {
+		case RaftRoleFollower:
+			followers += 1
+		case RaftRoleCandidate:
+			candidates += 1
+		case RaftRoleLeader:
+			leaders += 1
+		}
+	}
+
+	if leaders != 1 {
+		t.Errorf("leaders = %d, want 1", leaders)
+	}
+	if followers != 2 {
+		t.Errorf("followers = %d, want 2", followers)
+	}
+	if candidates != 0 {
+		t.Errorf("candidates = %d, want 0", candidates)
+	}
+
+	// Clean up
+	for id, srv := range servers {
+		srv.Shutdown()
+		raftGroup[id].listener.Close()
+	}
 }
