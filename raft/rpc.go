@@ -1,17 +1,12 @@
 package raft
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"math/big"
-	"net"
-	"net/http"
 	"slices"
 	"sync"
 	"time"
@@ -20,6 +15,28 @@ import (
 type Term int64
 type ServerId int64
 type LogIndex int64
+
+// rpcOutgoingTransport is the interface implemented by the
+// external transport. At a peer, these messages are
+// processed by an rpcResponder.
+type rpcOutgoingTransport interface {
+
+	// makeRequestVoteRequest makes a request to peer asking for its vote
+	// in a leader election, returning the peer's vote.
+	makeRequestVoteRequest(
+		ctx context.Context,
+		peer ServerId,
+		requestVote RequestVoteReq,
+	) (*RequestVoteRes, error)
+
+	// makeHeartbeatRequest makes a heartbeat request to a peer, returning
+	// the result.
+	makeHeartbeatRequest(
+		ctx context.Context,
+		peer ServerId,
+		appendEntries AppendEntriesReq,
+	) (*AppendEntriesRes, error)
+}
 
 // noVote is a sentinel server ID for state.votedFor, representing
 // no candidate has been voted on this term.
@@ -103,7 +120,7 @@ type state struct {
 	electionDeadline time.Time
 	nextHeartbeat    time.Time
 
-	peerAddrs []net.Addr
+	peers []ServerId
 }
 
 type RaftServer struct {
@@ -112,11 +129,16 @@ type RaftServer struct {
 	// serverId is read-only server ID
 	serverId ServerId
 
+	// transport must be assigned before calling Start
+	transport rpcOutgoingTransport
+
 	// stop closes when we should stop
 	stop chan struct{}
+	// exited closes when raft ticker loop exits
+	exited chan struct{}
 }
 
-func NewRaftServer(serverId ServerId, peerAddrs []net.Addr) (*RaftServer, error) {
+func NewRaftServer(serverId ServerId, peers []ServerId) (*RaftServer, error) {
 	if serverId < 0 {
 		return nil, errors.New("serverId must be >0")
 	}
@@ -132,12 +154,13 @@ func NewRaftServer(serverId ServerId, peerAddrs []net.Addr) (*RaftServer, error)
 			lastApplied:      0,
 			nextIndex:        map[ServerId]LogIndex{},
 			matchIndex:       map[ServerId]LogIndex{},
-			peerAddrs:        slices.Clone(peerAddrs),
+			peers:            peers,
 			electionDeadline: electionDeadline,
 			nextHeartbeat:    nextHeartbeat,
 		},
 		serverId: serverId,
 		stop:     make(chan struct{}),
+		exited:   make(chan struct{}),
 	}, nil
 }
 
@@ -154,56 +177,26 @@ func newElectionDeadline() time.Time {
 }
 
 // Start starts the Raft server, and blocks until it is shutdown.
-func (r *RaftServer) Start(l net.Listener) {
-	// Start our HTTP server for other servers
-	mux := http.NewServeMux()
-	mux.HandleFunc("/append_entries", r.appendEntriesRPC)
-	mux.HandleFunc("/request_vote", r.requestVoteRPC)
-	srv := &http.Server{
-		Handler:        mux,
-		ReadTimeout:    1 * time.Second,
-		WriteTimeout:   1 * time.Second,
-		MaxHeaderBytes: 1 << 20,
+func (r *RaftServer) Start() {
+	// We take actions for every tick. Requests from other servers
+	// are processed in callbacks from the transport.
+	const checkInterval = 25 * time.Millisecond
+	t := time.NewTicker(checkInterval)
+	for {
+		select {
+		case <-r.stop:
+			close(r.exited)
+			return
+		case <-t.C:
+			r.maybeStartElection()
+			r.maybeSendHeartbeats()
+		}
 	}
-
-	wg := sync.WaitGroup{}
-
-	// Handle events based on state
-	wg.Go(func() {
-		if err := srv.Serve(l); err != nil {
-			log.Printf("Error serving HTTP: %v", err)
-		}
-	})
-
-	// Election timeout and heartbeats
-	wg.Go(func() {
-		const checkInterval = 25 * time.Millisecond
-
-		t := time.NewTicker(checkInterval)
-		for {
-			select {
-			case <-r.stop:
-				return
-			case <-t.C:
-				r.maybeStartElection()
-				r.maybeSendHeartbeats()
-			}
-		}
-	})
-
-	// Handle shutdown
-	wg.Go(func() {
-		<-r.stop
-		if err := srv.Shutdown(context.Background()); err != nil {
-			log.Printf("HTTP server Shutdown: %v", err)
-		}
-	})
-
-	wg.Wait()
 }
 
 func (r *RaftServer) Shutdown() {
 	close(r.stop)
+	<-r.exited
 }
 
 // Role returns the current Raft role of this server.
@@ -213,31 +206,7 @@ func (r *RaftServer) Role() RaftRole {
 	return r.state.role
 }
 
-func (r *RaftServer) appendEntriesRPC(w http.ResponseWriter, req *http.Request) {
-	defer req.Body.Close()
-	data, err := io.ReadAll(req.Body)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	appendEntries := AppendEntriesReq{}
-	err = json.Unmarshal(data, &appendEntries)
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
-	response := r.processAppendEntriesRequest(&appendEntries)
-
-	data, err = json.Marshal(response)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	w.Write(data)
-}
-
-func (r *RaftServer) processAppendEntriesRequest(appendEntries *AppendEntriesReq) *AppendEntriesRes {
+func (r *RaftServer) processAppendEntriesRequest(appendEntries AppendEntriesReq) *AppendEntriesRes {
 	r.state.Lock()
 	defer r.state.Unlock()
 
@@ -264,33 +233,7 @@ func (r *RaftServer) processAppendEntriesRequest(appendEntries *AppendEntriesReq
 	return &AppendEntriesRes{Term: ct, Success: true}
 }
 
-func (r *RaftServer) requestVoteRPC(w http.ResponseWriter, req *http.Request) {
-	defer req.Body.Close()
-	data, err := io.ReadAll(req.Body)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	// log.Printf("[%d] requestVoteRPC body=%s", r.serverId, data)
-	requestVote := RequestVoteReq{}
-	err = json.Unmarshal(data, &requestVote)
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
-	// log.Printf("[%d] requestVoteRPC request=%+v", r.serverId, requestVote)
-	response := r.processRequestVote(&requestVote)
-
-	data, err = json.Marshal(&response)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	w.Write(data)
-}
-
-func (r *RaftServer) processRequestVote(requestVote *RequestVoteReq) *RequestVoteRes {
+func (r *RaftServer) processRequestVote(requestVote RequestVoteReq) *RequestVoteRes {
 	r.state.Lock()
 	defer r.state.Unlock()
 
@@ -375,7 +318,7 @@ func (r *RaftServer) maybeStartElection() {
 // run another election.
 func (r *RaftServer) runElection(ctx context.Context) {
 	r.state.Lock()
-	peers := slices.Clone(r.state.peerAddrs)
+	peers := slices.Clone(r.state.peers)
 	electionTerm := r.state.currentTerm
 	log.Printf("[%d] runElection term=%d", r.serverId, electionTerm)
 	r.state.Unlock()
@@ -387,11 +330,7 @@ func (r *RaftServer) runElection(ctx context.Context) {
 		LastLogTerm:  0,
 	}
 	log.Printf("[%d] runElection request=%+v", r.serverId, voteReq)
-	reqVoteBody, err := json.Marshal(voteReq)
-	if err != nil {
-		panic("Should never have un-marshal-able request vote body")
-	}
-	won := r.collectVotes(ctx, peers, reqVoteBody)
+	won := r.collectVotes(ctx, peers, voteReq)
 
 	r.state.Lock()
 	defer r.state.Unlock()
@@ -423,7 +362,7 @@ func (r *RaftServer) runElection(ctx context.Context) {
 
 // collectVotes sends peers vote requests, and returns true if this
 // node received a majority of votes.
-func (r *RaftServer) collectVotes(ctx context.Context, peers []net.Addr, reqVoteBody []byte) ElectionResult {
+func (r *RaftServer) collectVotes(ctx context.Context, peers []ServerId, reqVoteReq RequestVoteReq) ElectionResult {
 	votes := make(chan bool, len(peers))
 	votesForMe := 1 // vote for self
 	votesRequired := len(peers)/2 + 1
@@ -431,9 +370,9 @@ func (r *RaftServer) collectVotes(ctx context.Context, peers []net.Addr, reqVote
 	// Send RequestVote RPCs, ensuring timeout using ctx
 	for _, peer := range peers {
 		go func() {
-			peerResult, err := r.makeRequestVoteRequest(ctx, peer, reqVoteBody)
+			peerResult, err := r.transport.makeRequestVoteRequest(ctx, peer, reqVoteReq)
 			if err != nil {
-				log.Printf("Error requesting vote from %s; assuming false vote: %v", peer, err)
+				log.Printf("Error requesting vote from %d; assuming false vote: %v", peer, err)
 				votes <- false
 				return
 			}
@@ -494,40 +433,12 @@ func (r *RaftServer) collectVotes(ctx context.Context, peers []net.Addr, reqVote
 	// If we win the election, we will have returned during for loop,
 	// unless we are the only server.
 	if votesForMe >= votesRequired {
-		log.Printf("[%d] collectVotes WON electionTerm=%d", r.serverId, r.state.currentTerm)
+		log.Printf("[%d] collectVotes WON electionTerm=%d", r.serverId, ct)
 		return true
 	} else {
-		log.Printf("[%d] collectVotes NOTENOUGHVOTES electionTerm=%d", r.serverId, r.state.currentTerm)
+		log.Printf("[%d] collectVotes NOT_ENOUGH_VOTES electionTerm=%d", r.serverId, ct)
 		return false
 	}
-}
-
-// makeRequestVoteRequest makes a request to peer asking for its vote
-// in a leader election, returning the peer's vote.
-func (r *RaftServer) makeRequestVoteRequest(ctx context.Context, peer net.Addr, reqVoteBody []byte) (*RequestVoteRes, error) {
-	// log.Printf("[%d] makeRequestVoteRequest body=%s", r.serverId, reqVoteBody)
-	req, _ := http.NewRequestWithContext(
-		ctx,
-		"POST",
-		fmt.Sprintf("http://%s/request_vote", peer.String()),
-		bytes.NewReader(reqVoteBody),
-	)
-	req.Header.Add("Content-Type", "application/json")
-	res, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer res.Body.Close()
-	data, err := io.ReadAll(res.Body)
-	if err != nil {
-		return nil, err
-	}
-	result := &RequestVoteRes{}
-	err = json.Unmarshal(data, result)
-	if err != nil {
-		return nil, err
-	}
-	return result, nil
 }
 
 // maybeSendHeartbeats checks whether we are in the right state to
@@ -553,16 +464,13 @@ func (r *RaftServer) maybeSendHeartbeats() {
 // until complete.
 func (r *RaftServer) sendLeaderHeartbeats() {
 	r.state.Lock()
-	data, err := json.Marshal(&AppendEntriesReq{
+	appendEntriesReq := AppendEntriesReq{
 		Term:         r.state.currentTerm,
 		LeaderId:     r.serverId,
 		PrevLogIndex: 0,
 		PrevLogTerm:  0,
 		Entries:      []LogEntry{},
 		LeaderCommit: 0,
-	})
-	if err != nil {
-		panic("Should never have un-marshal-able heartbeat body")
 	}
 	r.state.Unlock()
 
@@ -570,9 +478,9 @@ func (r *RaftServer) sendLeaderHeartbeats() {
 	ctx, cancel := context.WithTimeout(context.Background(), heartbeatDuration)
 	defer cancel()
 	wg := sync.WaitGroup{}
-	for _, peer := range r.state.peerAddrs {
+	for _, peer := range r.state.peers {
 		wg.Go(func() {
-			result, err := r.makeHeartbeatRequest(ctx, peer, data)
+			result, err := r.transport.makeHeartbeatRequest(ctx, peer, appendEntriesReq)
 			if err != nil {
 				log.Printf("Error sending heartbeat to %v: %v", peer, err)
 				return
@@ -591,37 +499,4 @@ func (r *RaftServer) sendLeaderHeartbeats() {
 		})
 	}
 	wg.Wait()
-}
-
-// makeHeartbeatRequest makes a heartbeat request to a peer, returning
-// the result.
-func (r *RaftServer) makeHeartbeatRequest(
-	ctx context.Context,
-	peer net.Addr,
-	bodyData []byte,
-) (*AppendEntriesRes, error) {
-	log.Printf("[%d] makeHeartBeatRequest body=%s", r.serverId, bodyData)
-	req, _ := http.NewRequestWithContext(
-		ctx,
-		"POST",
-		fmt.Sprintf("http://%s/append_entries", peer.String()),
-		bytes.NewReader(bodyData),
-	)
-	req.Header.Add("Content-Type", "application/json")
-	res, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer res.Body.Close()
-	data, err := io.ReadAll(res.Body)
-	if err != nil {
-		return nil, err
-	}
-	result := &AppendEntriesRes{}
-	err = json.Unmarshal(data, result)
-	if err != nil {
-		return nil, err
-	}
-
-	return result, nil
 }

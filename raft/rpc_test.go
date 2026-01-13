@@ -1,196 +1,159 @@
 package raft
 
 import (
+	"fmt"
 	"net"
 	"testing"
-	"testing/synctest"
 	"time"
 )
 
-// fakeListener is a net.Listener that blocks on Accept until closed.
-// Required for synctest because real network I/O is not "durably blocked".
-type fakeListener struct {
-	closed chan struct{}
-}
-
-func newFakeListener() *fakeListener {
-	return &fakeListener{closed: make(chan struct{})}
-}
-
-func (f *fakeListener) Accept() (net.Conn, error) {
-	<-f.closed
-	return nil, net.ErrClosed
-}
-
-func (f *fakeListener) Close() error {
-	select {
-	case <-f.closed:
-	default:
-		close(f.closed)
-	}
-	return nil
-}
-
-func (f *fakeListener) Addr() net.Addr {
-	return &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0}
-}
-
 func TestSingleServerBecomesLeader(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		srv, err := NewRaftServer(1, []net.Addr{})
-		if err != nil {
-			t.Fatalf("NewRaftServer failed: %v", err)
-		}
+	transport, err := NewHttpTransport()
+	if err != nil {
+		t.Fatalf("NewHttpTransport failed: %v", err)
+	}
+	raftSrv, err := NewRaftServer(1, []ServerId{})
+	if err != nil {
+		t.Fatalf("NewRaftServer failed: %v", err)
+	}
+	transport.Host(raftSrv)
 
-		listener := newFakeListener()
+	go transport.Serve()
+	go raftSrv.Start()
 
-		go srv.Start(listener)
+	// Server should start as follower
+	if role := raftSrv.Role(); role != RaftRoleFollower {
+		t.Errorf("srv.Role() = %s, want RaftRoleCandidate", role)
+	}
 
-		// Server should start as follower
-		synctest.Wait()
-		if role := srv.Role(); role != RaftRoleFollower {
-			t.Errorf("srv.Role() = %s, want RaftRoleCandidate", role)
-		}
+	// Wait for election timeout (150-300ms) plus some buffer
+	time.Sleep(350 * time.Millisecond)
 
-		// Wait for election timeout (150-300ms) plus some buffer
-		time.Sleep(350 * time.Millisecond)
-		synctest.Wait()
+	// Server should be the leader, because there is only one
+	// server, so by voting for itself it is in the majority.
+	if role := raftSrv.Role(); role != RaftRoleLeader {
+		t.Errorf("srv.Role() = %s, want RaftRoleLeader", role)
+	}
 
-		// Server should be the leader, because there is only one
-		// server, so by voting for itself it is in the majority.
-		if role := srv.Role(); role != RaftRoleLeader {
-			t.Errorf("srv.Role() = %s, want RaftRoleLeader", role)
-		}
-
-		// Clean up
-		srv.Shutdown()
-		listener.Close()
-		synctest.Wait()
-	})
+	// Clean up
+	raftSrv.Shutdown()
+	transport.Shutdown()
 }
 
 func TestThreeServersOneLeaderAtStartup(t *testing.T) {
-	// Generate the "template" for each raft server.
-	type Peer struct {
-		id       ServerId
-		listener net.Listener
-		addr     net.Addr
-	}
-	raftGroup := []Peer{}
-	for id := range 3 {
-		l, err := net.Listen("tcp", ":0")
+	transports := map[ServerId]*HttpTransport{}
+	raftServers := map[ServerId]*RaftServer{}
+	addrs := map[ServerId]net.Addr{}
+	serverIds := []ServerId{1, 2, 3}
+	for _, id := range serverIds {
+		transport, err := NewHttpTransport()
 		if err != nil {
-			t.Fatalf("Couldn't open tcp listener: %v", err)
+			t.Fatalf("NewHttpTransport failed: %v", err)
 		}
-		raftGroup = append(raftGroup, Peer{
-			id:       ServerId(id),
-			listener: l,
-			addr:     l.Addr(),
-		})
-	}
-
-	servers := []*RaftServer{}
-	for _, peer := range raftGroup {
-		peerAddrs := []net.Addr{}
-		for _, cp := range raftGroup {
-			if cp.id != peer.id {
-				peerAddrs = append(peerAddrs, cp.addr)
-			}
-		}
-
-		srv, err := NewRaftServer(peer.id, peerAddrs)
+		raftSrv, err := NewRaftServer(id, filter(serverIds, id))
 		if err != nil {
 			t.Fatalf("NewRaftServer failed: %v", err)
 		}
-		go srv.Start(peer.listener)
+		transport.Host(raftSrv)
 
-		servers = append(servers, srv)
+		transports[id] = transport
+		raftServers[id] = raftSrv
+		addrs[id] = transport.Addr()
+	}
+	// Tell each transport about the others' addresses
+	for _, transport := range transports {
+		transport.peerAddrs = addrs
+	}
+	// Start everything up
+	for _, transport := range transports {
+		go transport.Serve()
+	}
+	for _, raft := range raftServers {
+		go raft.Start()
 	}
 
 	// All servers should start as Followers
-	for id, srv := range servers {
-		if role := srv.Role(); role != RaftRoleFollower {
+	for id, raft := range raftServers {
+		if role := raft.Role(); role != RaftRoleFollower {
 			t.Errorf("srv[%d].Role() = %s, want RaftRoleFollower", id, role)
 		}
 	}
 
 	// Two servers should be followers, one should be leader
-	wantedState := makeWantedState(t, 1, 0, 2)
-	waitForWantedState(t, servers, wantedState)
+	wantedState := makeWantedState(1, 0, 2)
+	waitForWantedState(t, raftServers, wantedState)
 
 	// Clean up
-	for id, srv := range servers {
-		srv.Shutdown()
-		raftGroup[id].listener.Close()
+	for _, transport := range transports {
+		transport.Shutdown()
+	}
+	for _, raft := range raftServers {
+		raft.Shutdown()
 	}
 }
 
 func TestThreeServersOneLeaderAfterLeaderDies(t *testing.T) {
-	// Generate the "template" for each raft server.
-	type Peer struct {
-		id       ServerId
-		listener net.Listener
-		addr     net.Addr
-	}
-	raftGroup := []Peer{}
-	for id := range 3 {
-		l, err := net.Listen("tcp", ":0")
+	transports := map[ServerId]*HttpTransport{}
+	raftServers := map[ServerId]*RaftServer{}
+	addrs := map[ServerId]net.Addr{}
+	serverIds := []ServerId{1, 2, 3}
+	for _, id := range serverIds {
+		transport, err := NewHttpTransport()
 		if err != nil {
-			t.Fatalf("Couldn't open tcp listener: %v", err)
+			t.Fatalf("NewHttpTransport failed: %v", err)
 		}
-		raftGroup = append(raftGroup, Peer{
-			id:       ServerId(id),
-			listener: l,
-			addr:     l.Addr(),
-		})
-	}
-
-	servers := []*RaftServer{}
-	for _, peer := range raftGroup {
-		peerAddrs := []net.Addr{}
-		for _, cp := range raftGroup {
-			if cp.id != peer.id {
-				peerAddrs = append(peerAddrs, cp.addr)
-			}
-		}
-
-		srv, err := NewRaftServer(peer.id, peerAddrs)
+		raftSrv, err := NewRaftServer(id, filter(serverIds, id))
 		if err != nil {
 			t.Fatalf("NewRaftServer failed: %v", err)
 		}
-		go srv.Start(peer.listener)
+		transport.Host(raftSrv)
 
-		servers = append(servers, srv)
+		transports[id] = transport
+		raftServers[id] = raftSrv
+		addrs[id] = transport.Addr()
+	}
+	// Tell all transports about all the others' addresses
+	for _, transport := range transports {
+		transport.peerAddrs = addrs
+	}
+	// Start everything
+	for _, transport := range transports {
+		go transport.Serve()
+	}
+	for _, raft := range raftServers {
+		go raft.Start()
 	}
 
 	// All servers should start as Followers
-	for id, srv := range servers {
-		if role := srv.Role(); role != RaftRoleFollower {
+	for id, raft := range raftServers {
+		if role := raft.Role(); role != RaftRoleFollower {
 			t.Errorf("srv[%d].Role() = %s, want RaftRoleFollower", id, role)
 		}
 	}
 
 	// Two servers should be followers, one should be leader
-	wantedState := makeWantedState(t, 1, 0, 2)
-	waitForWantedState(t, servers, wantedState)
+	// Save the leader ID as we will kill it.
+	wantedState := makeWantedState(1, 0, 2)
+	waitForWantedState(t, raftServers, wantedState)
 	var firstLeaderId ServerId
-	for _, srv := range servers {
+	for _, srv := range raftServers {
 		if srv.Role() == RaftRoleLeader {
 			firstLeaderId = srv.serverId
 		}
 	}
 
-	// Kill current leader
-	servers[firstLeaderId].Shutdown()
-	servers[firstLeaderId] = nil
-
+	// Kill current leader --- leave the transport for
+	// reuse later as we can't reconfigure a cluster.
+	raftServers[firstLeaderId].Shutdown()
+	transports[firstLeaderId].Shutdown()
+	delete(raftServers, firstLeaderId)
 	t.Logf("KILLED THE LEADER %d", firstLeaderId)
 
 	// Now we should have 1 leader and 1 follower
-	wantedState = makeWantedState(t, 1, 0, 1)
-	waitForWantedState(t, servers, wantedState)
+	wantedState = makeWantedState(1, 0, 1)
+	waitForWantedState(t, raftServers, wantedState)
 	var secondLeaderId ServerId
-	for _, srv := range servers {
+	for _, srv := range raftServers {
 		if srv == nil {
 			continue // removed the leader
 		}
@@ -201,26 +164,23 @@ func TestThreeServersOneLeaderAfterLeaderDies(t *testing.T) {
 
 	// Create a new instance for server with ID firstLeaderId
 	// This is like firstLeaderId came back online after a restart.
-	peerAddrs := []net.Addr{}
-	for _, cp := range raftGroup {
-		if cp.id != firstLeaderId {
-			peerAddrs = append(peerAddrs, cp.addr)
-		}
-	}
 	var err error
-	servers[firstLeaderId], err = NewRaftServer(firstLeaderId, peerAddrs)
+	newRaftServer, err := NewRaftServer(firstLeaderId, filter(serverIds, firstLeaderId))
+	newRaftServer.transport = transports[firstLeaderId] // reuse transport
 	if err != nil {
 		t.Fatalf("Error creating new server for leaderID %d", firstLeaderId)
 	}
-	go servers[firstLeaderId].Start(raftGroup[firstLeaderId].listener)
+	raftServers[firstLeaderId] = newRaftServer
+	go transports[firstLeaderId].Serve()
+	go newRaftServer.Start()
 	t.Logf("REPLACED SERVER AT %d", firstLeaderId)
 
 	// Should be back to one leader with two followers, and the
 	// leader should not have changed.
-	wantedState = makeWantedState(t, 1, 0, 2)
-	waitForWantedState(t, servers, wantedState)
+	wantedState = makeWantedState(1, 0, 2)
+	waitForWantedState(t, raftServers, wantedState)
 	var thirdLeaderId ServerId
-	for _, srv := range servers {
+	for _, srv := range raftServers {
 		if srv.Role() == RaftRoleLeader {
 			thirdLeaderId = srv.serverId
 		}
@@ -230,42 +190,52 @@ func TestThreeServersOneLeaderAfterLeaderDies(t *testing.T) {
 	}
 
 	// Clean up
-	for id, srv := range servers {
-		srv.Shutdown()
-		raftGroup[id].listener.Close()
+	for _, transport := range transports {
+		transport.Shutdown()
 	}
+	for _, raft := range raftServers {
+		raft.Shutdown()
+	}
+}
+
+// filter removes items matching `remove` from `list`.
+// Used to create the list of peers for a given raft server such
+// that the list doesn't include the server itself.
+func filter[T comparable](list []T, remove T) []T {
+	filtered := []T{}
+	for _, item := range list {
+		if item != remove {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
 }
 
 // makeWantedState creates a checker that a state is what
 // is wanted.
-func makeWantedState(t *testing.T, l, c, f int) func(l, c, f int, lastIteration bool) bool {
-	return func(gotL, gotC, gotF int, lastIteration bool) bool {
+func makeWantedState(wantL, wantC, wantF int) func(l, c, f int, lastIteration bool) (bool, []error) {
+	return func(gotL, gotC, gotF int, lastIteration bool) (bool, []error) {
 		result := true
-		if gotL != l {
-			if lastIteration {
-				t.Errorf("leaders = %d, want 1", gotL)
-			}
+		errs := []error{}
+		if gotL != wantL {
+			errs = append(errs, fmt.Errorf("leaders = %d, want %d", gotL, wantL))
 			result = false
 		}
-		if gotC != c {
-			if lastIteration {
-				t.Errorf("candidates = %d, want 0", gotC)
-			}
+		if gotC != wantC {
+			errs = append(errs, fmt.Errorf("candidates = %d, want %d", gotC, wantC))
 			result = false
 		}
-		if gotF != f {
-			if lastIteration {
-				t.Errorf("followers = %d, want 2", gotF)
-			}
+		if gotF != wantF {
+			errs = append(errs, fmt.Errorf("followers = %d, want %d", gotF, wantF))
 			result = false
 		}
-		return result
+		return result, errs
 	}
 }
 
 // waitForWantedState waits a bounded amount of time for a given
 // state to be true.
-func waitForWantedState(t *testing.T, servers []*RaftServer, wantedState func(l int, c int, f int, lastIteration bool) bool) {
+func waitForWantedState(t *testing.T, servers map[ServerId]*RaftServer, wantedState func(l int, c int, f int, lastIteration bool) (bool, []error)) {
 	leaders, followers, candidates := 0, 0, 0
 	for range 100 {
 		leaders, followers, candidates = 0, 0, 0
@@ -282,12 +252,15 @@ func waitForWantedState(t *testing.T, servers []*RaftServer, wantedState func(l 
 				leaders += 1
 			}
 		}
-		if wantedState(leaders, candidates, followers, false) {
+		if ok, _ := wantedState(leaders, candidates, followers, false); ok {
 			break
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	if !wantedState(leaders, candidates, followers, true) {
+	if ok, errs := wantedState(leaders, candidates, followers, false); !ok {
+		for _, err := range errs {
+			t.Error(err)
+		}
 		t.Fatal("Never reached required state")
 	}
 }
