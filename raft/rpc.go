@@ -466,22 +466,27 @@ func (r *RaftServer) collectVotes(ctx context.Context, peers []net.Addr, reqVote
 		}()
 	}
 
+	r.state.Lock()
+	// Save currentTerm inside lock for later logging, not otherwise used.
+	ct := r.state.currentTerm
+	r.state.Unlock()
+
 	// Wait for enough responses to declare victory, or timeout,
 	// or we receive all responses but not enough to win.
 	for range len(peers) {
 		select {
 		case v := <-votes:
-			log.Printf("[%d] collectVotes received vote electionTerm=%d, vote=%t", r.serverId, r.state.currentTerm, v)
+			log.Printf("[%d] collectVotes received vote electionTerm=%d, vote=%t", r.serverId, ct, v)
 			if v {
 				votesForMe += 1
 			}
 			// Exit if we got the required number of votes
 			if votesForMe >= votesRequired {
-				log.Printf("[%d] collectVotes WON electionTerm=%d", r.serverId, r.state.currentTerm)
+				log.Printf("[%d] collectVotes WON electionTerm=%d", r.serverId, ct)
 				return true
 			}
 		case <-ctx.Done(): // too few responses before timed out
-			log.Printf("[%d] collectVotes TIMEOUT electionTerm=%d", r.serverId, r.state.currentTerm)
+			log.Printf("[%d] collectVotes TIMEOUT electionTerm=%d", r.serverId, ct)
 			return false
 		}
 	}
