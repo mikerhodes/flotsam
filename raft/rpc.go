@@ -3,10 +3,13 @@ package raft
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"math/big"
+	"os"
+	"path/filepath"
 	"slices"
 	"sync"
 	"time"
@@ -123,8 +126,46 @@ type state struct {
 	peers []ServerId
 }
 
+// persistentState loads and saves raft persistent state
+type persistentState struct {
+	CurrentTerm Term
+	VotedFor    ServerId
+	Log         []LogEntry
+}
+
+func LoadPersistentState(stateDir string) (persistentState, error) {
+	ps := persistentState{}
+	data, err := os.ReadFile(filepath.Join(stateDir, "raft.json"))
+	if err != nil {
+		return ps, fmt.Errorf("loading state: %w", err)
+	}
+	err = json.Unmarshal(data, &ps)
+	if err != nil {
+		return ps, fmt.Errorf("loading state: %w", err)
+	}
+	return ps, nil
+}
+
+func (ps *persistentState) Save(stateDir string) error {
+	data, err := json.Marshal(ps)
+	if err != nil {
+		return fmt.Errorf("saving state: %w", err)
+	}
+
+	// This isn't super safe (we should write + move)
+	err = os.WriteFile(filepath.Join(stateDir, "raft.json"), data, 0666)
+	if err != nil {
+		return fmt.Errorf("saving state: %w", err)
+	}
+
+	return nil
+}
+
 type RaftServer struct {
 	state *state
+
+	// stateDir is the storage location for persistent state
+	stateDir string
 
 	// serverId is read-only server ID
 	serverId ServerId
@@ -138,7 +179,7 @@ type RaftServer struct {
 	exited chan struct{}
 }
 
-func NewRaftServer(serverId ServerId, peers []ServerId) (*RaftServer, error) {
+func NewRaftServer(serverId ServerId, peers []ServerId, stateDir string) (*RaftServer, error) {
 	if serverId < 0 {
 		return nil, errors.New("serverId must be >0")
 	}
@@ -158,6 +199,7 @@ func NewRaftServer(serverId ServerId, peers []ServerId) (*RaftServer, error) {
 			electionDeadline: electionDeadline,
 			nextHeartbeat:    nextHeartbeat,
 		},
+		stateDir: stateDir,
 		serverId: serverId,
 		stop:     make(chan struct{}),
 		exited:   make(chan struct{}),
@@ -178,6 +220,15 @@ func newElectionDeadline() time.Time {
 
 // Start starts the Raft server, and blocks until it is shutdown.
 func (r *RaftServer) Start() {
+	// Load persistent state
+	if ps, err := LoadPersistentState(r.stateDir); err == nil {
+		r.state.Lock()
+		r.state.currentTerm = ps.CurrentTerm
+		r.state.votedFor = ps.VotedFor
+		r.state.log = ps.Log
+		r.state.Unlock()
+	}
+
 	// We take actions for every tick. Requests from other servers
 	// are processed in callbacks from the transport.
 	const checkInterval = 25 * time.Millisecond
@@ -199,6 +250,20 @@ func (r *RaftServer) Shutdown() {
 	<-r.exited
 }
 
+// persistState saves the raft persistent state to disk.
+// Call assumes state lock is held.
+func (r *RaftServer) persistState() {
+	ps := persistentState{
+		CurrentTerm: r.state.currentTerm,
+		VotedFor:    r.state.votedFor,
+		Log:         r.state.log,
+	}
+	err := ps.Save(r.stateDir)
+	if err != nil {
+		panic(fmt.Sprintf("Error saving state; panic: %v", err))
+	}
+}
+
 // Role returns the current Raft role of this server.
 func (r *RaftServer) Role() RaftRole {
 	r.state.Lock()
@@ -206,9 +271,17 @@ func (r *RaftServer) Role() RaftRole {
 	return r.state.role
 }
 
+// CurrentTerm returns the current term of this server.
+func (r *RaftServer) CurrentTerm() Term {
+	r.state.Lock()
+	defer r.state.Unlock()
+	return r.state.currentTerm
+}
+
 func (r *RaftServer) processAppendEntriesRequest(appendEntries AppendEntriesReq) *AppendEntriesRes {
 	r.state.Lock()
 	defer r.state.Unlock()
+	defer r.persistState()
 
 	ct := r.state.currentTerm
 
@@ -236,6 +309,7 @@ func (r *RaftServer) processAppendEntriesRequest(appendEntries AppendEntriesReq)
 func (r *RaftServer) processRequestVote(requestVote RequestVoteReq) *RequestVoteRes {
 	r.state.Lock()
 	defer r.state.Unlock()
+	defer r.persistState()
 
 	ct := r.state.currentTerm
 
@@ -291,6 +365,7 @@ func (r *RaftServer) processRequestVote(requestVote RequestVoteReq) *RequestVote
 func (r *RaftServer) maybeStartElection() {
 	r.state.Lock()
 	defer r.state.Unlock()
+	defer r.persistState()
 
 	if r.state.role == RaftRoleLeader {
 		return
@@ -334,6 +409,7 @@ func (r *RaftServer) runElection(ctx context.Context) {
 
 	r.state.Lock()
 	defer r.state.Unlock()
+	defer r.persistState()
 
 	// No longer a candidate
 	if r.state.role != RaftRoleCandidate {
@@ -381,6 +457,7 @@ func (r *RaftServer) collectVotes(ctx context.Context, peers []ServerId, reqVote
 			// has moved forward.
 			r.state.Lock()
 			defer r.state.Unlock()
+			defer r.persistState()
 
 			log.Printf("[%d] collectVotes received vote electionTerm=%d, peerResult=%v", r.serverId, r.state.currentTerm, peerResult)
 
@@ -489,10 +566,12 @@ func (r *RaftServer) sendLeaderHeartbeats() {
 			// Make any state updates based on the response.
 			r.state.Lock()
 			defer r.state.Unlock()
+			defer r.persistState()
 
 			// Time has moved on, and another leader has likely
 			// arisen. Accept this, and become a follower. (section 5.1)
 			if result.Term > r.state.currentTerm {
+				r.state.currentTerm = result.Term
 				r.state.role = RaftRoleFollower
 				r.state.votedFor = noVote
 			}

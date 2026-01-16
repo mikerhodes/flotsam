@@ -8,11 +8,12 @@ import (
 )
 
 func TestSingleServerBecomesLeader(t *testing.T) {
+	stateDir := t.TempDir()
 	transport, err := NewHttpTransport()
 	if err != nil {
 		t.Fatalf("NewHttpTransport failed: %v", err)
 	}
-	raftSrv, err := NewRaftServer(1, []ServerId{})
+	raftSrv, err := NewRaftServer(1, []ServerId{}, stateDir)
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
@@ -43,6 +44,7 @@ func TestSingleServerBecomesLeader(t *testing.T) {
 func TestThreeServersOneLeaderAtStartup(t *testing.T) {
 	transports := map[ServerId]*HttpTransport{}
 	raftServers := map[ServerId]*RaftServer{}
+	stateDirs := map[ServerId]string{}
 	addrs := map[ServerId]net.Addr{}
 	serverIds := []ServerId{1, 2, 3}
 	for _, id := range serverIds {
@@ -50,7 +52,8 @@ func TestThreeServersOneLeaderAtStartup(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewHttpTransport failed: %v", err)
 		}
-		raftSrv, err := NewRaftServer(id, filter(serverIds, id))
+		stateDir := t.TempDir()
+		raftSrv, err := NewRaftServer(id, filter(serverIds, id), stateDir)
 		if err != nil {
 			t.Fatalf("NewRaftServer failed: %v", err)
 		}
@@ -58,6 +61,7 @@ func TestThreeServersOneLeaderAtStartup(t *testing.T) {
 
 		transports[id] = transport
 		raftServers[id] = raftSrv
+		stateDirs[id] = stateDir
 		addrs[id] = transport.Addr()
 	}
 	// Tell each transport about the others' addresses
@@ -92,9 +96,10 @@ func TestThreeServersOneLeaderAtStartup(t *testing.T) {
 	}
 }
 
-func TestThreeServersOneLeaderAfterLeaderDies(t *testing.T) {
+func TestThreeServersPersistTerm(t *testing.T) {
 	transports := map[ServerId]*HttpTransport{}
 	raftServers := map[ServerId]*RaftServer{}
+	stateDirs := map[ServerId]string{}
 	addrs := map[ServerId]net.Addr{}
 	serverIds := []ServerId{1, 2, 3}
 	for _, id := range serverIds {
@@ -102,7 +107,8 @@ func TestThreeServersOneLeaderAfterLeaderDies(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewHttpTransport failed: %v", err)
 		}
-		raftSrv, err := NewRaftServer(id, filter(serverIds, id))
+		stateDir := t.TempDir()
+		raftSrv, err := NewRaftServer(id, filter(serverIds, id), stateDir)
 		if err != nil {
 			t.Fatalf("NewRaftServer failed: %v", err)
 		}
@@ -110,6 +116,79 @@ func TestThreeServersOneLeaderAfterLeaderDies(t *testing.T) {
 
 		transports[id] = transport
 		raftServers[id] = raftSrv
+		stateDirs[id] = stateDir
+		addrs[id] = transport.Addr()
+	}
+	// Tell each transport about the others' addresses
+	for _, transport := range transports {
+		transport.peerAddrs = addrs
+	}
+	// Start everything up
+	for _, transport := range transports {
+		go transport.Serve()
+	}
+	for _, raft := range raftServers {
+		go raft.Start()
+	}
+
+	// Wait for leader
+	wantedState := makeWantedState(1, 0, 2)
+	waitForWantedState(t, raftServers, wantedState)
+
+	// Get the leader's term before shutdown
+	var leaderTerm Term
+	for _, raft := range raftServers {
+		if raft.Role() == RaftRoleLeader {
+			leaderTerm = raft.CurrentTerm()
+			break
+		}
+	}
+
+	// Shutdown all servers to ensure state is persisted
+	for _, raft := range raftServers {
+		raft.Shutdown()
+	}
+	for _, transport := range transports {
+		transport.Shutdown()
+	}
+
+	// Check state for each server
+	for id, stateDir := range stateDirs {
+		ps, err := LoadPersistentState(stateDir)
+		if err != nil {
+			t.Fatalf("Failed to load persistent state for server %d: %v", id, err)
+		}
+		if ps.CurrentTerm != leaderTerm {
+			t.Errorf("Server %d ps.CurrentTerm = %d, want %d", id, ps.CurrentTerm, leaderTerm)
+		}
+		if ps.VotedFor == noVote {
+			// All servers should have sent a vote for this term
+			t.Errorf("Server %d ps.VotedFor = %d, want != %d", id, ps.VotedFor, noVote)
+		}
+	}
+}
+
+func TestThreeServersOneLeaderAfterLeaderDies(t *testing.T) {
+	transports := map[ServerId]*HttpTransport{}
+	raftServers := map[ServerId]*RaftServer{}
+	stateDirs := map[ServerId]string{}
+	addrs := map[ServerId]net.Addr{}
+	serverIds := []ServerId{1, 2, 3}
+	for _, id := range serverIds {
+		transport, err := NewHttpTransport()
+		if err != nil {
+			t.Fatalf("NewHttpTransport failed: %v", err)
+		}
+		stateDir := t.TempDir()
+		raftSrv, err := NewRaftServer(id, filter(serverIds, id), stateDir)
+		if err != nil {
+			t.Fatalf("NewRaftServer failed: %v", err)
+		}
+		transport.Host(raftSrv)
+
+		transports[id] = transport
+		raftServers[id] = raftSrv
+		stateDirs[id] = stateDir
 		addrs[id] = transport.Addr()
 	}
 	// Tell all transports about all the others' addresses
@@ -165,7 +244,7 @@ func TestThreeServersOneLeaderAfterLeaderDies(t *testing.T) {
 	// Create a new instance for server with ID firstLeaderId
 	// This is like firstLeaderId came back online after a restart.
 	var err error
-	newRaftServer, err := NewRaftServer(firstLeaderId, filter(serverIds, firstLeaderId))
+	newRaftServer, err := NewRaftServer(firstLeaderId, filter(serverIds, firstLeaderId), stateDirs[firstLeaderId])
 	newRaftServer.transport = transports[firstLeaderId] // reuse transport
 	if err != nil {
 		t.Fatalf("Error creating new server for leaderID %d", firstLeaderId)
