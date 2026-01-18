@@ -392,11 +392,14 @@ func (r *RaftServer) maybeStartElection() {
 	r.state.votedFor = r.serverId
 	log.Printf("%d became candidate, term=%d", r.serverId, r.state.currentTerm)
 
+	peers := slices.Clone(r.state.peers)
+	electionTerm := r.state.currentTerm
+
 	newDeadline := newElectionDeadline()
 	go func() {
 		ctx, cancel := context.WithDeadline(context.Background(), newDeadline)
 		defer cancel()
-		r.runElection(ctx)
+		r.runElection(ctx, electionTerm, peers)
 	}()
 	r.state.electionDeadline = newDeadline
 }
@@ -404,12 +407,8 @@ func (r *RaftServer) maybeStartElection() {
 // runElection runs a single election. We exit this function either as
 // follower, leader or still as a candidate. In the latter state, we
 // run another election.
-func (r *RaftServer) runElection(ctx context.Context) {
-	r.state.Lock()
-	peers := slices.Clone(r.state.peers)
-	electionTerm := r.state.currentTerm
+func (r *RaftServer) runElection(ctx context.Context, electionTerm Term, peers []ServerId) {
 	log.Printf("[%d] runElection term=%d", r.serverId, electionTerm)
-	r.state.Unlock()
 
 	voteReq := RequestVoteReq{
 		Term:         electionTerm,
@@ -418,7 +417,7 @@ func (r *RaftServer) runElection(ctx context.Context) {
 		LastLogTerm:  0,
 	}
 	log.Printf("[%d] runElection request=%+v", r.serverId, voteReq)
-	won := r.collectVotes(ctx, peers, voteReq)
+	won := r.collectVotes(ctx, electionTerm, peers, voteReq)
 
 	r.state.Lock()
 	defer r.state.Unlock()
@@ -450,7 +449,7 @@ func (r *RaftServer) runElection(ctx context.Context) {
 
 // collectVotes sends peers vote requests, and returns true if this
 // node received a majority of votes.
-func (r *RaftServer) collectVotes(ctx context.Context, peers []ServerId, reqVoteReq RequestVoteReq) ElectionResult {
+func (r *RaftServer) collectVotes(ctx context.Context, electionTerm Term, peers []ServerId, reqVoteReq RequestVoteReq) ElectionResult {
 	votes := make(chan bool, len(peers))
 	votesForMe := 1 // vote for self
 	votesRequired := len(peers)/2 + 1
@@ -475,14 +474,14 @@ func (r *RaftServer) collectVotes(ctx context.Context, peers []ServerId, reqVote
 
 			// Time has moved on and a new leader has arisen. Accept
 			// this and become a follower.
-			if peerResult.Term > r.state.currentTerm {
+			if peerResult.Term > electionTerm {
 				r.becomeFollower(peerResult.Term)
 				votes <- false
 				return
 			}
 
 			// A result from the past, discard it.
-			if peerResult.Term < r.state.currentTerm {
+			if peerResult.Term < electionTerm {
 				votes <- false
 				return
 			}
@@ -492,27 +491,22 @@ func (r *RaftServer) collectVotes(ctx context.Context, peers []ServerId, reqVote
 		}()
 	}
 
-	r.state.Lock()
-	// Save currentTerm inside lock for later logging, not otherwise used.
-	ct := r.state.currentTerm
-	r.state.Unlock()
-
 	// Wait for enough responses to declare victory, or timeout,
 	// or we receive all responses but not enough to win.
 	for range len(peers) {
 		select {
 		case v := <-votes:
-			log.Printf("[%d] collectVotes received vote electionTerm=%d, vote=%t", r.serverId, ct, v)
+			log.Printf("[%d] collectVotes received vote electionTerm=%d, vote=%t", r.serverId, electionTerm, v)
 			if v {
 				votesForMe += 1
 			}
 			// Exit if we got the required number of votes
 			if votesForMe >= votesRequired {
-				log.Printf("[%d] collectVotes WON electionTerm=%d", r.serverId, ct)
+				log.Printf("[%d] collectVotes WON electionTerm=%d", r.serverId, electionTerm)
 				return true
 			}
 		case <-ctx.Done(): // too few responses before timed out
-			log.Printf("[%d] collectVotes TIMEOUT electionTerm=%d", r.serverId, ct)
+			log.Printf("[%d] collectVotes TIMEOUT electionTerm=%d", r.serverId, electionTerm)
 			return false
 		}
 	}
@@ -520,10 +514,10 @@ func (r *RaftServer) collectVotes(ctx context.Context, peers []ServerId, reqVote
 	// If we win the election, we will have returned during for loop,
 	// unless we are the only server.
 	if votesForMe >= votesRequired {
-		log.Printf("[%d] collectVotes WON electionTerm=%d", r.serverId, ct)
+		log.Printf("[%d] collectVotes WON electionTerm=%d", r.serverId, electionTerm)
 		return true
 	} else {
-		log.Printf("[%d] collectVotes NOT_ENOUGH_VOTES electionTerm=%d", r.serverId, ct)
+		log.Printf("[%d] collectVotes NOT_ENOUGH_VOTES electionTerm=%d", r.serverId, electionTerm)
 		return false
 	}
 }
