@@ -161,9 +161,9 @@ func TestThreeServersPersistTerm(t *testing.T) {
 		if ps.CurrentTerm != leaderTerm {
 			t.Errorf("Server %d ps.CurrentTerm = %d, want %d", id, ps.CurrentTerm, leaderTerm)
 		}
-		if ps.VotedFor == noVote {
+		if ps.VotedFor != noVote {
 			// All servers should have sent a vote for this term
-			t.Errorf("Server %d ps.VotedFor = %d, want != %d", id, ps.VotedFor, noVote)
+			t.Errorf("Server %d ps.VotedFor = %d, want = %d", id, ps.VotedFor, noVote)
 		}
 	}
 }

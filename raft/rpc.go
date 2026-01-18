@@ -278,6 +278,25 @@ func (r *RaftServer) CurrentTerm() Term {
 	return r.state.currentTerm
 }
 
+// becomeFollower makes us a follower and advances to term.
+// Caller must hold state lock.
+func (r *RaftServer) becomeFollower(term Term) {
+	r.state.currentTerm = term
+	r.state.role = RaftRoleFollower
+	r.state.votedFor = noVote
+	r.state.electionDeadline = newElectionDeadline()
+	log.Printf("%d became follower, term=%d", r.serverId, r.state.currentTerm)
+}
+
+// becomeLeader makes us a leader for the current term
+// Caller must hold state lock.
+func (r *RaftServer) becomeLeader() {
+	r.state.role = RaftRoleLeader
+	r.state.votedFor = noVote
+	r.state.nextHeartbeat = nextHeartbeat()
+	log.Printf("%d became leader, term=%d", r.serverId, r.state.currentTerm)
+}
+
 func (r *RaftServer) processAppendEntriesRequest(appendEntries AppendEntriesReq) *AppendEntriesRes {
 	r.state.Lock()
 	defer r.state.Unlock()
@@ -286,7 +305,7 @@ func (r *RaftServer) processAppendEntriesRequest(appendEntries AppendEntriesReq)
 	ct := r.state.currentTerm
 
 	// Out of date request
-	if appendEntries.Term < r.state.currentTerm {
+	if appendEntries.Term < ct {
 		return &AppendEntriesRes{Term: ct, Success: false}
 	}
 
@@ -295,14 +314,9 @@ func (r *RaftServer) processAppendEntriesRequest(appendEntries AppendEntriesReq)
 
 	// If we receive an AppendEntries with Term >= currentTerm,
 	// we are definitely not the leader for this term.
-	if appendEntries.Term >= r.state.currentTerm {
-		r.state.role = RaftRoleFollower
+	if appendEntries.Term >= ct {
+		r.becomeFollower(appendEntries.Term)
 	}
-	// If we have moved to a new term, clear our vote state
-	if appendEntries.Term > r.state.currentTerm {
-		r.state.votedFor = noVote
-	}
-	r.state.currentTerm = appendEntries.Term
 	return &AppendEntriesRes{Term: ct, Success: true}
 }
 
@@ -329,10 +343,8 @@ func (r *RaftServer) processRequestVote(requestVote RequestVoteReq) *RequestVote
 	// Vote is for a newer term, move ourselves to that term and
 	// become a follower before processing. (section 5.1)
 	if requestVote.Term > ct {
-		r.state.role = RaftRoleFollower
-		r.state.votedFor = noVote
+		r.becomeFollower(requestVote.Term)
 	}
-	r.state.currentTerm = requestVote.Term
 	ct = r.state.currentTerm
 
 	// Only grant one vote per term (section 5.2)
@@ -378,6 +390,7 @@ func (r *RaftServer) maybeStartElection() {
 	r.state.role = RaftRoleCandidate
 	r.state.currentTerm += 1
 	r.state.votedFor = r.serverId
+	log.Printf("%d became candidate, term=%d", r.serverId, r.state.currentTerm)
 
 	newDeadline := newElectionDeadline()
 	go func() {
@@ -430,8 +443,7 @@ func (r *RaftServer) runElection(ctx context.Context) {
 	// It then sends heartbeat messages to all of the other servers to
 	// establish its authority and prevent new elections.
 	if won {
-		r.state.role = RaftRoleLeader
-		r.state.nextHeartbeat = nextHeartbeat()
+		r.becomeLeader()
 		go r.sendLeaderHeartbeats()
 	}
 }
@@ -464,9 +476,7 @@ func (r *RaftServer) collectVotes(ctx context.Context, peers []ServerId, reqVote
 			// Time has moved on and a new leader has arisen. Accept
 			// this and become a follower.
 			if peerResult.Term > r.state.currentTerm {
-				r.state.currentTerm = peerResult.Term
-				r.state.role = RaftRoleFollower
-				r.state.votedFor = noVote
+				r.becomeFollower(peerResult.Term)
 				votes <- false
 				return
 			}
@@ -571,9 +581,7 @@ func (r *RaftServer) sendLeaderHeartbeats() {
 			// Time has moved on, and another leader has likely
 			// arisen. Accept this, and become a follower. (section 5.1)
 			if result.Term > r.state.currentTerm {
-				r.state.currentTerm = result.Term
-				r.state.role = RaftRoleFollower
-				r.state.votedFor = noVote
+				r.becomeFollower(result.Term)
 			}
 		})
 	}
