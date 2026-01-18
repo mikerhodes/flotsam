@@ -416,7 +416,6 @@ func (r *RaftServer) runElection(ctx context.Context, electionTerm Term, peers [
 		LastLogIndex: 0,
 		LastLogTerm:  0,
 	}
-	log.Printf("[%d] runElection request=%+v", r.serverId, voteReq)
 	won := r.collectVotes(ctx, electionTerm, peers, voteReq)
 
 	r.state.Lock()
@@ -464,60 +463,55 @@ func (r *RaftServer) collectVotes(ctx context.Context, electionTerm Term, peers 
 				return
 			}
 
-			// Respond to result, which might indicate that time
-			// has moved forward.
 			r.state.Lock()
 			defer r.state.Unlock()
 			defer r.persistState()
 
-			log.Printf("[%d] collectVotes received vote electionTerm=%d, peerResult=%v", r.serverId, r.state.currentTerm, peerResult)
+			log.Printf(
+				"[%d] collectVotes received vote electionTerm=%d, peerResult=%v",
+				r.serverId, electionTerm, peerResult)
 
-			// Time has moved on and a new leader has arisen. Accept
-			// this and become a follower.
 			if peerResult.Term > electionTerm {
+				// Time has moved on and a new leader has arisen. Accept
+				// this and become a follower.
 				r.becomeFollower(peerResult.Term)
 				votes <- false
-				return
-			}
-
-			// A result from the past, discard it.
-			if peerResult.Term < electionTerm {
+			} else if peerResult.Term < electionTerm {
+				// A result from the past, discard it.
 				votes <- false
-				return
+			} else {
+				// Peer is still in the same term, use its result.
+				votes <- peerResult.VoteGranted
 			}
-
-			// Peer is still in the same term, use its result.
-			votes <- peerResult.VoteGranted
 		}()
 	}
 
 	// Wait for enough responses to declare victory, or timeout,
 	// or we receive all responses but not enough to win.
 	for range len(peers) {
-		select {
-		case v := <-votes:
-			log.Printf("[%d] collectVotes received vote electionTerm=%d, vote=%t", r.serverId, electionTerm, v)
-			if v {
-				votesForMe += 1
-			}
-			// Exit if we got the required number of votes
-			if votesForMe >= votesRequired {
-				log.Printf("[%d] collectVotes WON electionTerm=%d", r.serverId, electionTerm)
-				return true
-			}
-		case <-ctx.Done(): // too few responses before timed out
-			log.Printf("[%d] collectVotes TIMEOUT electionTerm=%d", r.serverId, electionTerm)
-			return false
+		v := <-votes
+		log.Printf(
+			"[%d] collectVotes received vote electionTerm=%d, vote=%t",
+			r.serverId, electionTerm, v)
+		if v {
+			votesForMe += 1
+		}
+		if votesForMe >= votesRequired {
+			break
 		}
 	}
 
 	// If we win the election, we will have returned during for loop,
 	// unless we are the only server.
 	if votesForMe >= votesRequired {
-		log.Printf("[%d] collectVotes WON electionTerm=%d", r.serverId, electionTerm)
+		log.Printf(
+			"[%d] collectVotes WON electionTerm=%d",
+			r.serverId, electionTerm)
 		return true
 	} else {
-		log.Printf("[%d] collectVotes NOT_ENOUGH_VOTES electionTerm=%d", r.serverId, electionTerm)
+		log.Printf(
+			"[%d] collectVotes NOT_ENOUGH_VOTES electionTerm=%d",
+			r.serverId, electionTerm)
 		return false
 	}
 }
