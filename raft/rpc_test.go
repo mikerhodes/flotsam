@@ -153,6 +153,7 @@ func TestThreeServersPersistTerm(t *testing.T) {
 	}
 
 	// Check state for each server
+	nVoted := 0
 	for id, stateDir := range stateDirs {
 		ps, err := LoadPersistentState(stateDir)
 		if err != nil {
@@ -162,9 +163,13 @@ func TestThreeServersPersistTerm(t *testing.T) {
 			t.Errorf("Server %d ps.CurrentTerm = %d, want %d", id, ps.CurrentTerm, leaderTerm)
 		}
 		if ps.VotedFor != noVote {
-			// All servers should have sent a vote for this term
-			t.Errorf("Server %d ps.VotedFor = %d, want = %d", id, ps.VotedFor, noVote)
+			nVoted++
 		}
+	}
+	if nVoted < 2 {
+		// At least two servers must have voted (inc. candidate)
+		// for a server to win.
+		t.Errorf("nVoted = %d, want > 2", nVoted)
 	}
 }
 

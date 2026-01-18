@@ -285,16 +285,15 @@ func (r *RaftServer) becomeFollower(term Term) {
 	r.state.role = RaftRoleFollower
 	r.state.votedFor = noVote
 	r.state.electionDeadline = newElectionDeadline()
-	log.Printf("%d became follower, term=%d", r.serverId, r.state.currentTerm)
+	log.Printf("[%d] became follower, term=%d", r.serverId, r.state.currentTerm)
 }
 
 // becomeLeader makes us a leader for the current term
 // Caller must hold state lock.
 func (r *RaftServer) becomeLeader() {
 	r.state.role = RaftRoleLeader
-	r.state.votedFor = noVote
 	r.state.nextHeartbeat = nextHeartbeat()
-	log.Printf("%d became leader, term=%d", r.serverId, r.state.currentTerm)
+	log.Printf("[%d] became leader, term=%d", r.serverId, r.state.currentTerm)
 }
 
 func (r *RaftServer) processAppendEntriesRequest(appendEntries AppendEntriesReq) *AppendEntriesRes {
@@ -314,8 +313,16 @@ func (r *RaftServer) processAppendEntriesRequest(appendEntries AppendEntriesReq)
 
 	// If we receive an AppendEntries with Term >= currentTerm,
 	// we are definitely not the leader for this term.
-	if appendEntries.Term >= ct {
+	if appendEntries.Term > ct {
 		r.becomeFollower(appendEntries.Term)
+	}
+	if appendEntries.Term == ct {
+		// While raft guarantees we can't have two leaders for
+		// a term, if we are a candidate we should become
+		// a follower if someone else won.
+		if r.state.role != RaftRoleFollower {
+			r.becomeFollower(appendEntries.Term)
+		}
 	}
 	return &AppendEntriesRes{Term: ct, Success: true}
 }
@@ -453,7 +460,7 @@ func (r *RaftServer) collectVotes(ctx context.Context, electionTerm Term, peers 
 	votesForMe := 1 // vote for self
 	votesRequired := len(peers)/2 + 1
 
-	// Send RequestVote RPCs, ensuring timeout using ctx
+	// Send RequestVote RPCs, ensuring timeout using ctx.
 	for _, peer := range peers {
 		go func() {
 			peerResult, err := r.transport.makeRequestVoteRequest(ctx, peer, reqVoteReq)
@@ -501,19 +508,10 @@ func (r *RaftServer) collectVotes(ctx context.Context, electionTerm Term, peers 
 		}
 	}
 
-	// If we win the election, we will have returned during for loop,
-	// unless we are the only server.
-	if votesForMe >= votesRequired {
-		log.Printf(
-			"[%d] collectVotes WON electionTerm=%d",
-			r.serverId, electionTerm)
-		return true
-	} else {
-		log.Printf(
-			"[%d] collectVotes NOT_ENOUGH_VOTES electionTerm=%d",
-			r.serverId, electionTerm)
-		return false
-	}
+	// Checking this after the votes are received ensures that
+	// we become leader in the (unusual) case that there are
+	// zero peers.
+	return votesForMe >= votesRequired
 }
 
 // maybeSendHeartbeats checks whether we are in the right state to
