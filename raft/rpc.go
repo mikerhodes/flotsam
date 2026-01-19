@@ -324,7 +324,7 @@ func (r *RaftServer) processAppendEntriesRequest(appendEntries AppendEntriesReq)
 			r.becomeFollower(appendEntries.Term)
 		}
 	}
-	return &AppendEntriesRes{Term: ct, Success: true}
+	return &AppendEntriesRes{Term: r.state.currentTerm, Success: true}
 }
 
 func (r *RaftServer) processRequestVote(requestVote RequestVoteReq) *RequestVoteRes {
