@@ -75,14 +75,62 @@ const electionTimeoutBase = 150 * time.Millisecond
 const electionPerturbation = 150 * time.Millisecond
 const heartbeatDuration = electionPerturbation / 2
 
-type LogEntry struct{}
+type LogEntry struct {
+	Term    Term
+	Command []byte
+}
+
+func (e *LogEntry) String() string {
+	return fmt.Sprintf("{Term: %d, Command: %v}", e.Term, e.Command)
+}
+
+// RaftLog is a log indexed from 1 rather than 0
+// to allow us to more closely match the paper.
+type RaftLog struct {
+	log []*LogEntry
+}
+
+func (rl *RaftLog) Get(idx LogIndex) (*LogEntry, bool) {
+	if idx < 1 {
+		return nil, false
+	}
+	if int(idx) > len(rl.log) {
+		return nil, false
+	}
+
+	return rl.log[idx-1], true
+}
+
+func (rl *RaftLog) Truncate(idx LogIndex) {
+	if idx < 1 {
+		return
+	}
+	if int(idx) > len(rl.log) {
+		return
+	}
+
+	rl.log = rl.log[:idx-1]
+}
+
+func (rl *RaftLog) Append(entries []*LogEntry) {
+	rl.log = append(rl.log, entries...)
+}
+func (rl *RaftLog) Replace(entries []*LogEntry) {
+	rl.log = entries
+}
+func (rl *RaftLog) Entries() []*LogEntry {
+	return rl.log
+}
+func (rl *RaftLog) Empty() bool {
+	return len(rl.log) == 0
+}
 
 type AppendEntriesReq struct {
 	Term         Term
 	LeaderId     ServerId
 	PrevLogIndex LogIndex
 	PrevLogTerm  Term
-	Entries      []LogEntry
+	Entries      []*LogEntry
 	LeaderCommit LogIndex
 }
 type AppendEntriesRes struct {
@@ -110,7 +158,7 @@ type state struct {
 	// Persistent state
 	currentTerm Term
 	votedFor    ServerId
-	log         []LogEntry
+	log         RaftLog
 
 	// Volatile state
 	commitIndex LogIndex
@@ -130,7 +178,7 @@ type state struct {
 type persistentState struct {
 	CurrentTerm Term
 	VotedFor    ServerId
-	Log         []LogEntry
+	Log         []*LogEntry
 }
 
 func LoadPersistentState(stateDir string) (persistentState, error) {
@@ -190,7 +238,7 @@ func NewRaftServer(serverId ServerId, peers []ServerId, stateDir string) (*RaftS
 			role:             RaftRoleFollower,
 			currentTerm:      0,
 			votedFor:         noVote,
-			log:              []LogEntry{},
+			log:              RaftLog{[]*LogEntry{}},
 			commitIndex:      0,
 			lastApplied:      0,
 			nextIndex:        map[ServerId]LogIndex{},
@@ -225,7 +273,7 @@ func (r *RaftServer) Start() {
 		r.state.Lock()
 		r.state.currentTerm = ps.CurrentTerm
 		r.state.votedFor = ps.VotedFor
-		r.state.log = ps.Log
+		r.state.log.Replace(ps.Log)
 		r.state.Unlock()
 	}
 
@@ -256,7 +304,7 @@ func (r *RaftServer) persistState() {
 	ps := persistentState{
 		CurrentTerm: r.state.currentTerm,
 		VotedFor:    r.state.votedFor,
-		Log:         r.state.log,
+		Log:         r.state.log.Entries(),
 	}
 	err := ps.Save(r.stateDir)
 	if err != nil {
@@ -324,6 +372,86 @@ func (r *RaftServer) processAppendEntriesRequest(appendEntries AppendEntriesReq)
 			r.becomeFollower(appendEntries.Term)
 		}
 	}
+
+	ct = r.state.currentTerm
+
+	// If there are entries, entry at prevLogIndex must match term
+	// prevLogTerm (5.3)
+	if !(appendEntries.PrevLogIndex == 0 && r.state.log.Empty()) {
+		entry, found := r.state.log.Get(appendEntries.PrevLogIndex)
+		if !found {
+			log.Printf("prevLogIndex not found, idx=%d, len(log)=%d",
+				appendEntries.PrevLogIndex, len(r.state.log.Entries()))
+			return &AppendEntriesRes{Term: ct, Success: false}
+		}
+		if entry.Term != appendEntries.PrevLogTerm {
+			log.Printf("prevLogTerm mismatch, prevLogTerm=%d, entry.Term=%d",
+				appendEntries.PrevLogTerm, entry.Term)
+			return &AppendEntriesRes{Term: ct, Success: false}
+		}
+	}
+
+	// Truncate if we find a mismatched entry (5.3)
+	logStartIdx := appendEntries.PrevLogIndex + 1
+	log.Printf("Starting truncate and dedup at logStartIdx=%d", logStartIdx)
+	log.Printf("Log: %v", r.state.log.Entries())
+	appendEntriesIdx := 0
+	for {
+		logIndex := logStartIdx + LogIndex(appendEntriesIdx)
+		entry, found := r.state.log.Get(logIndex)
+		if !found { // reached end of our log
+			log.Printf("Truncate reached end of log at logIndex=%d", logIndex)
+			break
+		}
+		if appendEntriesIdx >= len(appendEntries.Entries) {
+			log.Printf(
+				"Truncate reached end of Entries appendEntriesIdx=%d",
+				appendEntriesIdx)
+			break
+		}
+		if entry.Term != appendEntries.Entries[appendEntriesIdx].Term {
+			log.Printf("Truncating from %d", logIndex)
+			r.state.log.Truncate(logIndex)
+			break
+		}
+		appendEntriesIdx++
+	}
+
+	// Skip entries from req that are already in our log
+	log.Printf("Log: %v", r.state.log.Entries())
+	appendEntriesIdx = 0
+	for {
+		logIndex := logStartIdx + LogIndex(appendEntriesIdx)
+		entry, found := r.state.log.Get(logIndex)
+		if !found { // reached end of our log
+			log.Printf("Dedup reached end of log at logIndex=%d", logIndex)
+			break
+		}
+		if appendEntriesIdx >= len(appendEntries.Entries) {
+			log.Printf(
+				"Dedup reached end of Entries appendEntriesIdx=%d",
+				appendEntriesIdx)
+			break
+		}
+		if entry.Term != appendEntries.Entries[appendEntriesIdx].Term {
+			log.Printf("Dedup exited at %d", logIndex)
+			break
+		}
+		log.Printf("Dedup found dup at logIndex=%d, appendEntriesIdx=%d",
+			logIndex, appendEntriesIdx)
+		appendEntriesIdx++
+	}
+
+	newEntries := appendEntries.Entries[appendEntriesIdx:]
+	log.Printf("newEntries=%s", newEntries)
+
+	// Append any new entries to our log
+	r.state.log.Append(newEntries)
+
+	// If leaderCommit > commitIndex,
+	// set commitIndex = min(leaderCommit, index last new entry)
+	// TODO
+
 	return &AppendEntriesRes{Term: r.state.currentTerm, Success: true}
 }
 
@@ -542,7 +670,7 @@ func (r *RaftServer) sendLeaderHeartbeats() {
 		LeaderId:     r.serverId,
 		PrevLogIndex: 0,
 		PrevLogTerm:  0,
-		Entries:      []LogEntry{},
+		Entries:      []*LogEntry{},
 		LeaderCommit: 0,
 	}
 	r.state.Unlock()
