@@ -124,6 +124,9 @@ func (rl *RaftLog) Entries() []*LogEntry {
 func (rl *RaftLog) Empty() bool {
 	return len(rl.log) == 0
 }
+func (rl *RaftLog) Len() int {
+	return len(rl.log)
+}
 
 type AppendEntriesReq struct {
 	Term         Term
@@ -147,6 +150,16 @@ type RequestVoteReq struct {
 type RequestVoteRes struct {
 	Term        Term
 	VoteGranted bool
+}
+
+// ClientCommandReq and ClientCommandRes are used to receive
+// and respond to client commands.
+type ClientCommandReq struct {
+	Command []byte
+}
+type ClientCommandRes struct {
+	Success bool
+	Err     error
 }
 
 type state struct {
@@ -453,6 +466,75 @@ func (r *RaftServer) processAppendEntriesRequest(appendEntries AppendEntriesReq)
 	// TODO
 
 	return &AppendEntriesRes{Term: r.state.currentTerm, Success: true}
+}
+
+func (r *RaftServer) processClientCommand(
+	command ClientCommandReq,
+) *ClientCommandRes {
+	r.state.Lock()
+	defer r.state.Unlock()
+	defer r.persistState()
+
+	if r.state.role != RaftRoleLeader {
+		return &ClientCommandRes{
+			Success: false,
+			Err:     errors.New("Client commands only accepted by leader"),
+		}
+	}
+
+	newEntries := []*LogEntry{{
+		Term:    r.state.currentTerm,
+		Command: command.Command,
+	}}
+	r.state.log.Append(newEntries)
+
+	appendEntriesReq := AppendEntriesReq{
+		Term:         r.state.currentTerm,
+		LeaderId:     r.serverId,
+		PrevLogIndex: LogIndex(r.state.log.Len()),
+		PrevLogTerm:  0,
+		Entries:      newEntries,
+		LeaderCommit: r.state.commitIndex,
+	}
+
+	// Start with all peers
+	remainingPeers := slices.Clone(r.state.peers)
+	success := 0
+	successRequired := len(r.state.peers)/2 + 1
+	done := make(chan struct{})
+	go func() {
+		for len(remainingPeers) > 0 {
+			// Loop through remaining peers to reply success.
+			// On success, remove them from the remaining peers slice.
+			for _, peer := range slices.Clone(remainingPeers) {
+				res, err := r.transport.makeHeartbeatRequest(
+					context.Background(), peer, appendEntriesReq,
+				)
+				if err != nil {
+					continue
+				}
+				if res.Success {
+					remainingPeers = slices.DeleteFunc(
+						remainingPeers,
+						func(e ServerId) bool { return e == peer })
+					success += 1
+
+					// Notify client call we have successfully
+					// replicated to enough peers.
+					if success >= successRequired {
+						close(done)
+					}
+				}
+			}
+		}
+	}()
+
+	<-done
+
+	return &ClientCommandRes{
+		Success: true,
+		Err:     nil,
+	}
 }
 
 func (r *RaftServer) processRequestVote(requestVote RequestVoteReq) *RequestVoteRes {

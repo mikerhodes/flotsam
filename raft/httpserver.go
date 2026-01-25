@@ -13,6 +13,7 @@ import (
 
 // rpcResponder is the interface implemented by the Raft consensus module.
 type rpcResponder interface {
+	processClientCommand(command ClientCommandReq) *ClientCommandRes
 	processRequestVote(requestVote RequestVoteReq) *RequestVoteRes
 	processAppendEntriesRequest(appendEntries AppendEntriesReq) *AppendEntriesRes
 }
