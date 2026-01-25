@@ -364,6 +364,12 @@ func (r *RaftServer) becomeFollower(term Term) {
 // Caller must hold state lock.
 func (r *RaftServer) becomeLeader() {
 	r.state.role = RaftRoleLeader
+	r.state.nextIndex = map[ServerId]LogIndex{}
+	r.state.matchIndex = map[ServerId]LogIndex{}
+	for _, peer := range r.state.peers {
+		r.state.nextIndex[peer] = LogIndex(r.state.log.Len() + 1)
+		r.state.matchIndex[peer] = 0
+	}
 	r.state.nextHeartbeat = nextHeartbeat()
 	log.Printf("[%d] became leader, term=%d", r.serverId, r.state.currentTerm)
 }
@@ -539,7 +545,7 @@ func (r *RaftServer) catchUpPeer(
 ) {
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), heartbeatDuration)
-		currentAEReq, newIndex := r.nextAEReqForPeer(peer)
+		currentAEReq, newNextIndex := r.nextAEReqForPeer(peer)
 		res, err := r.transport.makeHeartbeatRequest(
 			ctx, peer, currentAEReq,
 		)
@@ -558,8 +564,8 @@ func (r *RaftServer) catchUpPeer(
 
 		// Successfully caught up, break loop
 		r.state.Lock()
-		r.state.nextIndex[peer] = newIndex
-		r.state.matchIndex[peer] = newIndex
+		r.state.nextIndex[peer] = newNextIndex
+		r.state.matchIndex[peer] = newNextIndex
 		r.state.Unlock()
 		return
 	}
