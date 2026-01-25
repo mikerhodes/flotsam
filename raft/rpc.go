@@ -102,6 +102,16 @@ func (rl *RaftLog) Get(idx LogIndex) (*LogEntry, bool) {
 	return rl.log[idx-1], true
 }
 
+func (rl *RaftLog) SliceFrom(idx LogIndex) []*LogEntry {
+	if idx < 1 {
+		return rl.log
+	}
+	if int(idx) > len(rl.log) {
+		return []*LogEntry{}
+	}
+	return rl.log[idx-1:]
+}
+
 func (rl *RaftLog) Truncate(idx LogIndex) {
 	if idx < 1 {
 		return
@@ -475,10 +485,9 @@ func (r *RaftServer) processClientCommand(
 	command ClientCommandReq,
 ) *ClientCommandRes {
 	r.state.Lock()
-	defer r.state.Unlock()
-	defer r.persistState()
 
 	if r.state.role != RaftRoleLeader {
+		r.state.Unlock()
 		return &ClientCommandRes{
 			Success: false,
 			Err:     errors.New("Client commands only accepted by leader"),
@@ -491,45 +500,24 @@ func (r *RaftServer) processClientCommand(
 	}}
 	r.state.log.Append(newEntries)
 
-	// TODO This needs to respect the nextIndex for the
-	// destination peer rather than using newEntries,
-	// same prevLogIndex etc.
-	appendEntriesReq := AppendEntriesReq{
-		Term:         r.state.currentTerm,
-		LeaderId:     r.serverId,
-		PrevLogIndex: LogIndex(r.state.log.Len()),
-		PrevLogTerm:  0,
-		Entries:      newEntries,
-		LeaderCommit: r.state.commitIndex,
-	}
+	peers := slices.Clone(r.state.peers)
+
+	r.persistState()
+	r.state.Unlock()
 
 	// If we have peers, we need to wait for a majority to
 	// accept before returning.
-	if len(r.state.peers) > 0 {
+	if len(peers) > 0 {
 		success := atomic.Int32{}
-		successRequired := len(r.state.peers)/2 + 1
+		successRequired := len(peers)/2 + 1
 		done := make(chan struct{})
-		for _, peer := range r.state.peers {
+		for _, peer := range peers {
 			go func() {
-				for { // Loop until successful
-					res, err := r.transport.makeHeartbeatRequest(
-						context.Background(), peer, appendEntriesReq,
-					)
-					if err != nil {
-						// Assume err means network error
-						continue
-					}
-					if !res.Success {
-						// Assume !Success means log inconsistency
-						// TODO Decrement next index for server, try again
-						continue
-					}
+				r.catchUpPeer(peer)
 
-					log.Printf("[%d] Successfully replicated to %d", r.serverId, peer)
-					if int(success.Add(1)) >= successRequired {
-						close(done)
-					}
-					break
+				log.Printf("[%d] Successfully replicated to %d", r.serverId, peer)
+				if int(success.Add(1)) >= successRequired {
+					close(done)
 				}
 			}()
 		}
@@ -541,6 +529,65 @@ func (r *RaftServer) processClientCommand(
 		Success: true,
 		Err:     nil,
 	}
+}
+
+// catchUpPeer tries to catch up a peer, blocking until the peer
+// is caught up.
+// Do not call while holding state lock.
+func (r *RaftServer) catchUpPeer(
+	peer ServerId,
+) {
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), heartbeatDuration)
+		currentAEReq, newIndex := r.nextAEReqForPeer(peer)
+		res, err := r.transport.makeHeartbeatRequest(
+			ctx, peer, currentAEReq,
+		)
+		cancel()
+		if err != nil {
+			// Assume err means network error, don't decrement nextIndex
+			continue
+		}
+		if !res.Success {
+			// Assume !Success means log inconsistency - decrement nextIndex (5.3)
+			r.state.Lock()
+			r.state.nextIndex[peer] = max(0, r.state.nextIndex[peer]-1)
+			r.state.Unlock()
+			continue
+		}
+
+		// Successfully caught up, break loop
+		r.state.Lock()
+		r.state.nextIndex[peer] = newIndex
+		r.state.matchIndex[peer] = newIndex
+		r.state.Unlock()
+		return
+	}
+}
+
+// nextAEReqForPeer generates an AppendEntries request for the peer
+// that uses the nextIndex state to send the appropriate log entries.
+// Also returns the logIndex to advance peer to if request succeeds.
+// Do not call while holding the state lock.
+func (r *RaftServer) nextAEReqForPeer(peer ServerId) (AppendEntriesReq, LogIndex) {
+	r.state.Lock()
+	defer r.state.Unlock()
+
+	peerNextIndex := r.state.nextIndex[peer]
+	prevLogIndex := max(0, peerNextIndex-1)
+	prevLogTerm := Term(0)
+	if entry, found := r.state.log.Get(prevLogIndex); found {
+		prevLogTerm = entry.Term
+	}
+	appendEntriesReq := AppendEntriesReq{
+		Term:         r.state.currentTerm,
+		LeaderId:     r.serverId,
+		PrevLogIndex: prevLogIndex,
+		PrevLogTerm:  prevLogTerm,
+		Entries:      r.state.log.SliceFrom(peerNextIndex),
+		LeaderCommit: r.state.commitIndex,
+	}
+	return appendEntriesReq, LogIndex(r.state.log.Len())
 }
 
 func (r *RaftServer) processRequestVote(requestVote RequestVoteReq) *RequestVoteRes {
