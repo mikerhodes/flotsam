@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -101,6 +102,16 @@ func (rl *RaftLog) Get(idx LogIndex) (*LogEntry, bool) {
 	return rl.log[idx-1], true
 }
 
+func (rl *RaftLog) SliceFrom(idx LogIndex) []*LogEntry {
+	if idx < 1 {
+		return rl.log
+	}
+	if int(idx) > len(rl.log) {
+		return []*LogEntry{}
+	}
+	return rl.log[idx-1:]
+}
+
 func (rl *RaftLog) Truncate(idx LogIndex) {
 	if idx < 1 {
 		return
@@ -123,6 +134,9 @@ func (rl *RaftLog) Entries() []*LogEntry {
 }
 func (rl *RaftLog) Empty() bool {
 	return len(rl.log) == 0
+}
+func (rl *RaftLog) Len() int {
+	return len(rl.log)
 }
 
 type AppendEntriesReq struct {
@@ -147,6 +161,16 @@ type RequestVoteReq struct {
 type RequestVoteRes struct {
 	Term        Term
 	VoteGranted bool
+}
+
+// ClientCommandReq and ClientCommandRes are used to receive
+// and respond to client commands.
+type ClientCommandReq struct {
+	Command []byte
+}
+type ClientCommandRes struct {
+	Success bool
+	Err     error
 }
 
 type state struct {
@@ -340,6 +364,12 @@ func (r *RaftServer) becomeFollower(term Term) {
 // Caller must hold state lock.
 func (r *RaftServer) becomeLeader() {
 	r.state.role = RaftRoleLeader
+	r.state.nextIndex = map[ServerId]LogIndex{}
+	r.state.matchIndex = map[ServerId]LogIndex{}
+	for _, peer := range r.state.peers {
+		r.state.nextIndex[peer] = LogIndex(r.state.log.Len() + 1)
+		r.state.matchIndex[peer] = 0
+	}
 	r.state.nextHeartbeat = nextHeartbeat()
 	log.Printf("[%d] became leader, term=%d", r.serverId, r.state.currentTerm)
 }
@@ -453,6 +483,117 @@ func (r *RaftServer) processAppendEntriesRequest(appendEntries AppendEntriesReq)
 	// TODO
 
 	return &AppendEntriesRes{Term: r.state.currentTerm, Success: true}
+}
+
+// processClientCommand adds command to log, and blocks until a
+// majority of peers have the command replicated to their log.
+func (r *RaftServer) processClientCommand(
+	command ClientCommandReq,
+) *ClientCommandRes {
+	r.state.Lock()
+
+	if r.state.role != RaftRoleLeader {
+		r.state.Unlock()
+		return &ClientCommandRes{
+			Success: false,
+			Err:     errors.New("Client commands only accepted by leader"),
+		}
+	}
+
+	newEntries := []*LogEntry{{
+		Term:    r.state.currentTerm,
+		Command: command.Command,
+	}}
+	r.state.log.Append(newEntries)
+
+	peers := slices.Clone(r.state.peers)
+
+	r.persistState()
+	r.state.Unlock()
+
+	// If we have peers, we need to wait for a majority to
+	// accept before returning.
+	if len(peers) > 0 {
+		success := atomic.Int32{}
+		successRequired := len(peers)/2 + 1
+		done := make(chan struct{})
+		for _, peer := range peers {
+			go func() {
+				r.catchUpPeer(peer)
+
+				log.Printf("[%d] Successfully replicated to %d", r.serverId, peer)
+				if int(success.Add(1)) >= successRequired {
+					close(done)
+				}
+			}()
+		}
+
+		<-done
+	}
+
+	return &ClientCommandRes{
+		Success: true,
+		Err:     nil,
+	}
+}
+
+// catchUpPeer tries to catch up a peer, blocking until the peer
+// is caught up.
+// Do not call while holding state lock.
+func (r *RaftServer) catchUpPeer(
+	peer ServerId,
+) {
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), heartbeatDuration)
+		currentAEReq, newNextIndex := r.nextAEReqForPeer(peer)
+		res, err := r.transport.makeHeartbeatRequest(
+			ctx, peer, currentAEReq,
+		)
+		cancel()
+		if err != nil {
+			// Assume err means network error, don't decrement nextIndex
+			continue
+		}
+		if !res.Success {
+			// Assume !Success means log inconsistency - decrement nextIndex (5.3)
+			r.state.Lock()
+			r.state.nextIndex[peer] = max(0, r.state.nextIndex[peer]-1)
+			r.state.Unlock()
+			continue
+		}
+
+		// Successfully caught up, break loop
+		r.state.Lock()
+		r.state.nextIndex[peer] = newNextIndex
+		r.state.matchIndex[peer] = newNextIndex
+		r.state.Unlock()
+		return
+	}
+}
+
+// nextAEReqForPeer generates an AppendEntries request for the peer
+// that uses the nextIndex state to send the appropriate log entries.
+// Also returns the logIndex to advance peer to if request succeeds.
+// Do not call while holding the state lock.
+func (r *RaftServer) nextAEReqForPeer(peer ServerId) (AppendEntriesReq, LogIndex) {
+	r.state.Lock()
+	defer r.state.Unlock()
+
+	peerNextIndex := r.state.nextIndex[peer]
+	prevLogIndex := max(0, peerNextIndex-1)
+	prevLogTerm := Term(0)
+	if entry, found := r.state.log.Get(prevLogIndex); found {
+		prevLogTerm = entry.Term
+	}
+	appendEntriesReq := AppendEntriesReq{
+		Term:         r.state.currentTerm,
+		LeaderId:     r.serverId,
+		PrevLogIndex: prevLogIndex,
+		PrevLogTerm:  prevLogTerm,
+		Entries:      r.state.log.SliceFrom(peerNextIndex),
+		LeaderCommit: r.state.commitIndex,
+	}
+	return appendEntriesReq, LogIndex(r.state.log.Len())
 }
 
 func (r *RaftServer) processRequestVote(requestVote RequestVoteReq) *RequestVoteRes {

@@ -160,6 +160,63 @@ func (r *mockVoter) makeHeartbeatRequest(
 	}, nil
 }
 
+// TestBecomeLeaderInitializesNextIndexAndMatchIndex tests that when a server
+// becomes leader, nextIndex and matchIndex are initialized correctly per
+// Raft paper Figure 2:
+// - nextIndex[]: initialized to leader's last log index + 1
+// - matchIndex[]: initialized to 0
+func TestBecomeLeaderInitializesNextIndexAndMatchIndex(t *testing.T) {
+	peers := []ServerId{2, 3, 4}
+	raftSrv, err := NewRaftServer(1, peers, t.TempDir())
+	if err != nil {
+		t.Fatalf("NewRaftServer failed: %v", err)
+	}
+
+	raftSrv.state.log.Append([]*LogEntry{
+		{Term: 1, Command: []byte{1}},
+		{Term: 1, Command: []byte{2}},
+		{Term: 2, Command: []byte{3}}, // index 3, nextIndex=4
+	})
+
+	raftSrv.becomeLeader()
+
+	// nextIndex should be 4
+	for _, peer := range peers {
+		if got := raftSrv.state.nextIndex[peer]; got != 4 {
+			t.Errorf("nextIndex[%d] = %d, want 4", peer, got)
+		}
+	}
+
+	// matchIndex should be 0 for all peers
+	for _, peer := range peers {
+		if got := raftSrv.state.matchIndex[peer]; got != 0 {
+			t.Errorf("matchIndex[%d] = %d, want 0", peer, got)
+		}
+	}
+}
+
+// TestBecomeLeaderInitializesNextIndexEmptyLog tests nextIndex initialization
+// when the log is empty.
+func TestBecomeLeaderInitializesNextIndexEmptyLog(t *testing.T) {
+	peers := []ServerId{2, 3}
+	raftSrv, err := NewRaftServer(1, peers, t.TempDir())
+	if err != nil {
+		t.Fatalf("NewRaftServer failed: %v", err)
+	}
+
+	// Log is empty, so nextIndex should be 1
+	raftSrv.becomeLeader()
+
+	for _, peer := range peers {
+		if got := raftSrv.state.nextIndex[peer]; got != 1 {
+			t.Errorf("nextIndex[%d] = %d, want 1", peer, got)
+		}
+		if got := raftSrv.state.matchIndex[peer]; got != 0 {
+			t.Errorf("matchIndex[%d] = %d, want 0", peer, got)
+		}
+	}
+}
+
 func TestServerElection(t *testing.T) {
 	tests := []struct {
 		name         string
