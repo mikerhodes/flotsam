@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -468,6 +469,8 @@ func (r *RaftServer) processAppendEntriesRequest(appendEntries AppendEntriesReq)
 	return &AppendEntriesRes{Term: r.state.currentTerm, Success: true}
 }
 
+// processClientCommand adds command to log, and blocks until a
+// majority of peers have the command replicated to their log.
 func (r *RaftServer) processClientCommand(
 	command ClientCommandReq,
 ) *ClientCommandRes {
@@ -488,6 +491,9 @@ func (r *RaftServer) processClientCommand(
 	}}
 	r.state.log.Append(newEntries)
 
+	// TODO This needs to respect the nextIndex for the
+	// destination peer rather than using newEntries,
+	// same prevLogIndex etc.
 	appendEntriesReq := AppendEntriesReq{
 		Term:         r.state.currentTerm,
 		LeaderId:     r.serverId,
@@ -497,39 +503,39 @@ func (r *RaftServer) processClientCommand(
 		LeaderCommit: r.state.commitIndex,
 	}
 
-	// Start with all peers
-	remainingPeers := slices.Clone(r.state.peers)
-	success := 0
-	successRequired := len(r.state.peers)/2 + 1
-	done := make(chan struct{})
-	go func() {
-		for len(remainingPeers) > 0 {
-			// Loop through remaining peers to reply success.
-			// On success, remove them from the remaining peers slice.
-			for _, peer := range slices.Clone(remainingPeers) {
-				res, err := r.transport.makeHeartbeatRequest(
-					context.Background(), peer, appendEntriesReq,
-				)
-				if err != nil {
-					continue
-				}
-				if res.Success {
-					remainingPeers = slices.DeleteFunc(
-						remainingPeers,
-						func(e ServerId) bool { return e == peer })
-					success += 1
+	// If we have peers, we need to wait for a majority to
+	// accept before returning.
+	if len(r.state.peers) > 0 {
+		success := atomic.Int32{}
+		successRequired := len(r.state.peers)/2 + 1
+		done := make(chan struct{})
+		for _, peer := range r.state.peers {
+			go func() {
+				for { // Loop until successful
+					res, err := r.transport.makeHeartbeatRequest(
+						context.Background(), peer, appendEntriesReq,
+					)
+					if err != nil {
+						// Assume err means network error
+						continue
+					}
+					if !res.Success {
+						// Assume !Success means log inconsistency
+						// TODO Decrement next index for server, try again
+						continue
+					}
 
-					// Notify client call we have successfully
-					// replicated to enough peers.
-					if success >= successRequired {
+					log.Printf("[%d] Successfully replicated to %d", r.serverId, peer)
+					if int(success.Add(1)) >= successRequired {
 						close(done)
 					}
+					break
 				}
-			}
+			}()
 		}
-	}()
 
-	<-done
+		<-done
+	}
 
 	return &ClientCommandRes{
 		Success: true,
