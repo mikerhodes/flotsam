@@ -422,6 +422,21 @@ func (r *RaftServer) processAppendEntriesRequest(appendEntries AppendEntriesReq)
 	}
 
 	// Truncate if we find a mismatched entry (5.3)
+	// Raft guarantees that an index+term pair will
+	// always contain the same command. To enforce this,
+	// we have to drop "conflicting" log entries when
+	// we get a set of new entries that properly extends
+	// our log from prevLogIndex. We find the first
+	// entry (if any) that doesn't match, and drop that
+	// entry and all following ones.
+	// It'll look something like this (number is term):
+	//   log      new entries
+	//    5            (=prevLogIndex/=prevLogTerm)
+	//    5          5 (same term - okay)
+	//    5          5 (same term - okay)
+	//    5          6 (mismatching term, discard our log)
+	//    5          6
+	//    5            (we could even have a longer local log)
 	logStartIdx := appendEntries.PrevLogIndex + 1
 	log.Printf("Starting truncate and dedup at logStartIdx=%d", logStartIdx)
 	log.Printf("Log: %v", r.state.log.Entries())
@@ -447,35 +462,23 @@ func (r *RaftServer) processAppendEntriesRequest(appendEntries AppendEntriesReq)
 		appendEntriesIdx++
 	}
 
-	// Skip entries from req that are already in our log
-	log.Printf("Log: %v", r.state.log.Entries())
-	appendEntriesIdx = 0
-	for {
-		logIndex := logStartIdx + LogIndex(appendEntriesIdx)
-		entry, found := r.state.log.Get(logIndex)
-		if !found { // reached end of our log
-			log.Printf("Dedup reached end of log at logIndex=%d", logIndex)
-			break
-		}
-		if appendEntriesIdx >= len(appendEntries.Entries) {
-			log.Printf(
-				"Dedup reached end of Entries appendEntriesIdx=%d",
-				appendEntriesIdx)
-			break
-		}
-		if entry.Term != appendEntries.Entries[appendEntriesIdx].Term {
-			log.Printf("Dedup exited at %d", logIndex)
-			break
-		}
-		log.Printf("Dedup found dup at logIndex=%d, appendEntriesIdx=%d",
-			logIndex, appendEntriesIdx)
-		appendEntriesIdx++
-	}
-
-	newEntries := appendEntries.Entries[appendEntriesIdx:]
+	// Append any new entries not already in the log. First,
+	// skip entries from req that are already in our log.
+	// After truncation, we are guaranteed that the new
+	// entries either go at the end of our current log,
+	// or that they have matching entries overlapping.
+	// We just need to figure out the length of the
+	// overlap. It'll look something like this (number is
+	// log index, assume terms match due to truncation):
+	//   log      new entries
+	//    5            (=prevLogIndex)
+	//    6          6 (=prevLogIndex + 1) // discard new
+	//    7          7                     // discard new
+	//               8                     // append
+	//               9                     // append
+	overlap := r.state.log.Len() - int(appendEntries.PrevLogIndex)
+	newEntries := appendEntries.Entries[overlap:]
 	log.Printf("newEntries=%s", newEntries)
-
-	// Append any new entries to our log
 	r.state.log.Append(newEntries)
 
 	// If leaderCommit > commitIndex,
