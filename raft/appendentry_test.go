@@ -525,6 +525,148 @@ func TestAETruncateAndOnlyAddNewEntries(t *testing.T) {
 }
 
 //
+// Updating commitIndex from LeaderCommit
+//
+
+func TestAELeaderCommitUpdatesCommitIndex(t *testing.T) {
+	// "If leaderCommit > commitIndex, set commitIndex =
+	// min(leaderCommit, index of last new entry)"
+	originalLog := []*LogEntry{
+		{Term: 1, Command: []byte{1, 1}},
+		{Term: 1, Command: []byte{1, 2}},
+		{Term: 2, Command: []byte{2, 1}},
+		{Term: 3, Command: []byte{3, 1}},
+	}
+
+	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir())
+	if err != nil {
+		t.Fatalf("NewRaftServer failed: %v", err)
+	}
+	raftSrv.state.log = RaftLog{originalLog}
+	raftSrv.state.currentTerm = 3
+	raftSrv.state.commitIndex = 0
+
+	res := raftSrv.processAppendEntriesRequest(AppendEntriesReq{
+		Term:         3,
+		LeaderId:     2,
+		PrevLogIndex: 4,
+		PrevLogTerm:  3,
+		Entries:      []*LogEntry{},
+		LeaderCommit: 2,
+	})
+
+	if res.Success != true {
+		t.Errorf("res.Success = %t, want true", res.Success)
+	}
+	if raftSrv.state.commitIndex != 2 {
+		t.Errorf("commitIndex = %d, want 2", raftSrv.state.commitIndex)
+	}
+}
+
+func TestAELeaderCommitCappedByLogLength(t *testing.T) {
+	// "If leaderCommit > commitIndex, set commitIndex =
+	// min(leaderCommit, index of last new entry)"
+	// When leaderCommit exceeds our log length, cap at log length.
+	originalLog := []*LogEntry{
+		{Term: 1, Command: []byte{1, 1}},
+		{Term: 1, Command: []byte{1, 2}},
+	}
+
+	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir())
+	if err != nil {
+		t.Fatalf("NewRaftServer failed: %v", err)
+	}
+	raftSrv.state.log = RaftLog{originalLog}
+	raftSrv.state.currentTerm = 1
+	raftSrv.state.commitIndex = 0
+
+	res := raftSrv.processAppendEntriesRequest(AppendEntriesReq{
+		Term:         1,
+		LeaderId:     2,
+		PrevLogIndex: 2,
+		PrevLogTerm:  1,
+		Entries:      []*LogEntry{},
+		LeaderCommit: 5, // exceeds log length of 2
+	})
+
+	if res.Success != true {
+		t.Errorf("res.Success = %t, want true", res.Success)
+	}
+	if raftSrv.state.commitIndex != 2 {
+		t.Errorf("commitIndex = %d, want 2 (capped at log length)", raftSrv.state.commitIndex)
+	}
+}
+
+func TestAELeaderCommitNotUpdatedWhenLower(t *testing.T) {
+	// "If leaderCommit > commitIndex" -- if not greater, don't update
+	originalLog := []*LogEntry{
+		{Term: 1, Command: []byte{1, 1}},
+		{Term: 1, Command: []byte{1, 2}},
+		{Term: 2, Command: []byte{2, 1}},
+		{Term: 3, Command: []byte{3, 1}},
+		{Term: 3, Command: []byte{3, 2}},
+	}
+
+	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir())
+	if err != nil {
+		t.Fatalf("NewRaftServer failed: %v", err)
+	}
+	raftSrv.state.log = RaftLog{originalLog}
+	raftSrv.state.currentTerm = 3
+	raftSrv.state.commitIndex = 3
+
+	res := raftSrv.processAppendEntriesRequest(AppendEntriesReq{
+		Term:         3,
+		LeaderId:     2,
+		PrevLogIndex: 5,
+		PrevLogTerm:  3,
+		Entries:      []*LogEntry{},
+		LeaderCommit: 2, // lower than current commitIndex of 3
+	})
+
+	if res.Success != true {
+		t.Errorf("res.Success = %t, want true", res.Success)
+	}
+	if raftSrv.state.commitIndex != 3 {
+		t.Errorf("commitIndex = %d, want 3 (unchanged)", raftSrv.state.commitIndex)
+	}
+}
+
+func TestAELeaderCommitUpdatedAfterAppendingEntries(t *testing.T) {
+	// Verify commitIndex reflects log length *after* new entries
+	// are appended, not before.
+	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir())
+	if err != nil {
+		t.Fatalf("NewRaftServer failed: %v", err)
+	}
+	// Start with empty log
+	raftSrv.state.commitIndex = 0
+
+	newEntries := []*LogEntry{
+		{Term: 1, Command: []byte{1, 1}},
+		{Term: 1, Command: []byte{1, 2}},
+		{Term: 1, Command: []byte{1, 3}},
+	}
+
+	res := raftSrv.processAppendEntriesRequest(AppendEntriesReq{
+		Term:         1,
+		LeaderId:     2,
+		PrevLogIndex: 0,
+		PrevLogTerm:  0,
+		Entries:      newEntries,
+		LeaderCommit: 3, // commit all 3 new entries
+	})
+
+	if res.Success != true {
+		t.Errorf("res.Success = %t, want true", res.Success)
+	}
+	// Before appending entries, min(3,0) = 0; verify that's not happened
+	if raftSrv.state.commitIndex != 3 {
+		t.Errorf("commitIndex = %d, want 3", raftSrv.state.commitIndex)
+	}
+}
+
+//
 // Log persistence
 //
 
