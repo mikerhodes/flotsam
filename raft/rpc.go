@@ -139,6 +139,27 @@ func (rl *RaftLog) Len() int {
 	return len(rl.log)
 }
 
+// LastLogIndex returns the last log index.
+func (l *RaftLog) LastLogIndex() LogIndex {
+	return LogIndex(l.Len())
+}
+
+// AheadOf returns true if this log is ahead of the passed term and index.
+// State lock must be held when calling this method
+func (l *RaftLog) AheadOf(term Term, idx LogIndex) bool {
+	if l.Empty() {
+		return false
+	}
+
+	entry, _ := l.Get(LogIndex(l.Len()))
+
+	if entry.Term == term {
+		return idx < LogIndex(l.Len())
+	} else {
+		return term < entry.Term
+	}
+}
+
 type AppendEntriesReq struct {
 	Term         Term
 	LeaderId     ServerId
@@ -483,7 +504,7 @@ func (r *RaftServer) processAppendEntriesRequest(appendEntries AppendEntriesReq)
 
 	if appendEntries.LeaderCommit > r.state.commitIndex {
 		r.state.commitIndex = min(
-			appendEntries.LeaderCommit, LogIndex(r.state.log.Len()),
+			appendEntries.LeaderCommit, r.state.log.LastLogIndex(),
 		)
 	}
 
@@ -558,7 +579,7 @@ func (r *RaftServer) catchUpPeer(
 			r.state.Unlock()
 			return
 		}
-		if LogIndex(r.state.log.Len()) < r.state.nextIndex[peer] {
+		if r.state.log.LastLogIndex() < r.state.nextIndex[peer] {
 			// Caught up
 			r.state.Unlock()
 			return
@@ -651,16 +672,15 @@ func (r *RaftServer) processRequestVote(requestVote RequestVoteReq) *RequestVote
 		return &RequestVoteRes{Term: ct, VoteGranted: false}
 	}
 
-	// Section 5.4 safety property
-	// TODO this only makes sense when we are processing the log
-	// if requestVote.LastLogTerm < ct {
-	// 	log.Printf("[%d] processRequestVote LOWER_LAST_LOG_TERM electionTerm=%d", r.serverId, requestVote.Term)
-	// 	return &RequestVoteRes{Term: ct, VoteGranted: false}
-	// }
-	// if requestVote.LastLogIndex < r.state.lastApplied {
-	// 	log.Printf("[%d] processRequestVote LOWER_LAST_LOG_INDEX electionTerm=%d", r.serverId, requestVote.Term)
-	// 	return &RequestVoteRes{Term: ct, VoteGranted: false}
-	// }
+	// Section 5.4.1 safety property - election restriction
+	// A candidate should not win an election unless its log contains
+	// all committed entries.
+	if r.state.log.AheadOf(requestVote.LastLogTerm, requestVote.LastLogIndex) {
+		log.Printf(
+			"[%d] processRequestVote TOO_OLD_LOG_TERM LastLogTerm=%d",
+			r.serverId, requestVote.LastLogTerm)
+		return &RequestVoteRes{Term: ct, VoteGranted: false}
+	}
 
 	log.Printf("[%d] processRequestVote GRANTING_VOTE electionTerm=%d candidate=%d", r.serverId, requestVote.Term, requestVote.CandidateId)
 	r.state.votedFor = requestVote.CandidateId
@@ -708,11 +728,17 @@ func (r *RaftServer) maybeStartElection() {
 func (r *RaftServer) runElection(ctx context.Context, electionTerm Term, peers []ServerId) {
 	log.Printf("[%d] runElection term=%d", r.serverId, electionTerm)
 
+	lastLogTerm := Term(0)
+	entry, found := r.state.log.Get(r.state.log.LastLogIndex())
+	if found {
+		lastLogTerm = entry.Term
+	}
+
 	voteReq := RequestVoteReq{
 		Term:         electionTerm,
 		CandidateId:  r.serverId,
-		LastLogIndex: 0,
-		LastLogTerm:  0,
+		LastLogIndex: r.state.log.LastLogIndex(),
+		LastLogTerm:  lastLogTerm,
 	}
 	won := r.collectVotes(ctx, electionTerm, peers, voteReq)
 
