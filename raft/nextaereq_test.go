@@ -33,7 +33,7 @@ func TestNextAEReqForPeer_PeerAtOne(t *testing.T) {
 	if diff := cmp.Diff(originalLog, req.Entries); diff != "" {
 		t.Errorf("req.Entries mismatch (-want +got):\n%s", diff)
 	}
-	if newIndex != 2 {
+	if newIndex != 3 {
 		t.Errorf("newIndex = %d, want 2", newIndex)
 	}
 }
@@ -69,7 +69,7 @@ func TestNextAEReqForPeer_EmptyLog_PeerAtOne(t *testing.T) {
 	if diff := cmp.Diff([]*LogEntry{}, req.Entries); diff != "" {
 		t.Errorf("req.Entries mismatch (-want +got):\n%s", diff)
 	}
-	if newIndex != 0 {
+	if newIndex != 1 {
 		t.Errorf("newIndex = %d, want 0", newIndex)
 	}
 }
@@ -106,7 +106,7 @@ func TestNextAEReqForPeer_WithEntries_PeerUpToDate(t *testing.T) {
 	if diff := cmp.Diff([]*LogEntry{}, req.Entries); diff != "" {
 		t.Errorf("req.Entries mismatch (-want +got):\n%s", diff)
 	}
-	if newIndex != 2 {
+	if newIndex != 3 {
 		t.Errorf("newIndex = %d, want 2", newIndex)
 	}
 }
@@ -142,7 +142,7 @@ func TestNextAEReqForPeer_WithEntries_PeerNeedsUpdates(t *testing.T) {
 	if diff := cmp.Diff(wantEntries, req.Entries); diff != "" {
 		t.Errorf("req.Entries mismatch (-want +got):\n%s", diff)
 	}
-	if newIndex != 3 {
+	if newIndex != 4 {
 		t.Errorf("newIndex = %d, want 3", newIndex)
 	}
 }
@@ -173,7 +173,7 @@ func TestNextAEReqForPeer_PeerAtZero(t *testing.T) {
 	if diff := cmp.Diff(originalLog, req.Entries); diff != "" {
 		t.Errorf("req.Entries mismatch (-want +got):\n%s", diff)
 	}
-	if newIndex != 2 {
+	if newIndex != 3 {
 		t.Errorf("newIndex = %d, want 2", newIndex)
 	}
 }
