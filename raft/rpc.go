@@ -604,7 +604,9 @@ func (r *RaftServer) nextAEReqForPeer(peer ServerId) (AppendEntriesReq, LogIndex
 		Entries:      r.state.log.SliceFrom(peerNextIndex),
 		LeaderCommit: r.state.commitIndex,
 	}
-	return appendEntriesReq, LogIndex(r.state.log.Len())
+
+	// If successful, next index for peer should be just beyond current log
+	return appendEntriesReq, LogIndex(r.state.log.Len() + 1)
 }
 
 func (r *RaftServer) processRequestVote(requestVote RequestVoteReq) *RequestVoteRes {
