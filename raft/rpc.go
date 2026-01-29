@@ -481,9 +481,11 @@ func (r *RaftServer) processAppendEntriesRequest(appendEntries AppendEntriesReq)
 	log.Printf("newEntries=%s", newEntries)
 	r.state.log.Append(newEntries)
 
-	// If leaderCommit > commitIndex,
-	// set commitIndex = min(leaderCommit, index last new entry)
-	// TODO
+	if appendEntries.LeaderCommit > r.state.commitIndex {
+		r.state.commitIndex = min(
+			appendEntries.LeaderCommit, LogIndex(r.state.log.Len()),
+		)
+	}
 
 	return &AppendEntriesRes{Term: r.state.currentTerm, Success: true}
 }
