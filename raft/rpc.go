@@ -495,6 +495,8 @@ func (r *RaftServer) processAppendEntriesRequest(appendEntries AppendEntriesReq)
 func (r *RaftServer) processClientCommand(
 	command ClientCommandReq,
 ) *ClientCommandRes {
+	// Add entry to our log while holding the lock.
+	// Then try to apply to all followers.
 	r.state.Lock()
 
 	if r.state.role != RaftRoleLeader {
@@ -551,6 +553,11 @@ func (r *RaftServer) catchUpPeer(
 
 	for {
 		r.state.Lock()
+		if r.state.role != RaftRoleLeader {
+			// no longer leader
+			r.state.Unlock()
+			return
+		}
 		if LogIndex(r.state.log.Len()) < r.state.nextIndex[peer] {
 			// Caught up
 			r.state.Unlock()
