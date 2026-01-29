@@ -546,7 +546,16 @@ func (r *RaftServer) processClientCommand(
 func (r *RaftServer) catchUpPeer(
 	peer ServerId,
 ) {
+
 	for {
+		r.state.Lock()
+		if LogIndex(r.state.log.Len()) < r.state.nextIndex[peer] {
+			// Caught up
+			r.state.Unlock()
+			return
+		}
+		r.state.Unlock()
+
 		ctx, cancel := context.WithTimeout(context.Background(), heartbeatDuration)
 		currentAEReq, newNextIndex := r.nextAEReqForPeer(peer)
 		res, err := r.transport.makeHeartbeatRequest(
@@ -570,7 +579,6 @@ func (r *RaftServer) catchUpPeer(
 		r.state.nextIndex[peer] = newNextIndex
 		r.state.matchIndex[peer] = newNextIndex
 		r.state.Unlock()
-		return
 	}
 }
 
