@@ -587,9 +587,9 @@ func (r *RaftServer) catchUpPeer(
 		r.state.Unlock()
 
 		ctx, cancel := context.WithTimeout(context.Background(), heartbeatDuration)
-		currentAEReq, newNextIndex := r.nextAEReqForPeer(peer)
+		nextReq := r.nextAEReqForPeer(peer)
 		res, err := r.transport.makeHeartbeatRequest(
-			ctx, peer, currentAEReq,
+			ctx, peer, nextReq.req,
 		)
 		cancel()
 		if err != nil {
@@ -606,17 +606,80 @@ func (r *RaftServer) catchUpPeer(
 
 		// Successfully caught up, break loop
 		r.state.Lock()
-		r.state.nextIndex[peer] = newNextIndex
-		r.state.matchIndex[peer] = newNextIndex
+		r.state.nextIndex[peer] = nextReq.newNextIndex
+		r.state.matchIndex[peer] = nextReq.newMatchIndex
+		r.state.commitIndex = maybeUpdatedCommitIndex(
+			r.serverId,
+			r.state.currentTerm,
+			r.state.commitIndex,
+			r.state.matchIndex,
+			&r.state.log,
+		)
 		r.state.Unlock()
 	}
 }
 
+// maybeUpdatedCommitIndex will advance the commit index if enough
+// peers are beyond the current index.
+// The state lock must be held when calling this function.
+func maybeUpdatedCommitIndex(
+	serverId ServerId,
+	currentTerm Term,
+	currentCommitIndex LogIndex,
+	matchIndex map[ServerId]LogIndex,
+	raftLog *RaftLog,
+) LogIndex {
+	// from the paper: If there exists an N such that N > commitIndex, a
+	// majority of matchIndex[i] ≥ N, and log[N].term == currentTerm:
+	// set commitIndex = N (§5.3, §5.4).
+
+	log.Printf("[%d] maybeAdvanceCommitIndex %v %d %v", serverId, matchIndex, currentCommitIndex, raftLog.log)
+
+	// Collect our leader last log index alongside the peer matchIndex
+	// so we have all servers' known durable log indexes.
+	// Find the highest N in that array such that a majority is
+	// above it, that N is the commitIndex.
+	commitIndexes := []LogIndex{raftLog.LastLogIndex()}
+	for _, idx := range matchIndex {
+		commitIndexes = append(commitIndexes, idx)
+	}
+	slices.Sort(commitIndexes)
+	slices.Reverse(commitIndexes)
+	// Now we have, eg, [5,4,4,2,1], so 4 is majority for N
+	// Observation: N will always equal the mid value
+	n := commitIndexes[len(commitIndexes)/2]
+
+	// Check whether N > commitIndex
+	if n <= currentCommitIndex {
+		return currentCommitIndex
+	}
+	// Check the term on that log[N]
+	entry, found := raftLog.Get(n)
+	if !found {
+		log.Printf(
+			"[%d] maybeAdvanceCommitIndex - should be impossible for N>len(log)",
+			serverId)
+		return currentCommitIndex
+	}
+	if entry.Term != currentTerm {
+		return currentCommitIndex
+	}
+	// Bump commit index to N
+	return n
+}
+
+// nextAEReqForPeer is a container for the result of RaftServer.nextAEReqForPeer
+type nextAEReqForPeer struct {
+	req           AppendEntriesReq
+	newNextIndex  LogIndex
+	newMatchIndex LogIndex
+}
+
 // nextAEReqForPeer generates an AppendEntries request for the peer
 // that uses the nextIndex state to send the appropriate log entries.
-// Also returns the logIndex to advance peer to if request succeeds.
+// Returns the request, new nextIndex and matchIndex if req succeeds.
 // Do not call while holding the state lock.
-func (r *RaftServer) nextAEReqForPeer(peer ServerId) (AppendEntriesReq, LogIndex) {
+func (r *RaftServer) nextAEReqForPeer(peer ServerId) nextAEReqForPeer {
 	r.state.Lock()
 	defer r.state.Unlock()
 
@@ -636,7 +699,12 @@ func (r *RaftServer) nextAEReqForPeer(peer ServerId) (AppendEntriesReq, LogIndex
 	}
 
 	// If successful, next index for peer should be just beyond current log
-	return appendEntriesReq, LogIndex(r.state.log.Len() + 1)
+	newMatchIndex := prevLogIndex + LogIndex(len(appendEntriesReq.Entries))
+	return nextAEReqForPeer{
+		req:           appendEntriesReq,
+		newNextIndex:  newMatchIndex + 1,
+		newMatchIndex: newMatchIndex,
+	}
 }
 
 func (r *RaftServer) processRequestVote(requestVote RequestVoteReq) *RequestVoteRes {

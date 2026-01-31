@@ -22,19 +22,22 @@ func TestNextAEReqForPeer_PeerAtOne(t *testing.T) {
 	raftSrv.state.log = RaftLog{originalLog}
 	raftSrv.state.nextIndex[2] = 1 // peer needs all entries
 
-	req, newIndex := raftSrv.nextAEReqForPeer(2)
+	req := raftSrv.nextAEReqForPeer(2)
 
-	if req.PrevLogIndex != 0 {
-		t.Errorf("req.PrevLogIndex = %d, want 0", req.PrevLogIndex)
+	if req.req.PrevLogIndex != 0 {
+		t.Errorf("req.PrevLogIndex = %d, want 0", req.req.PrevLogIndex)
 	}
-	if req.PrevLogTerm != 0 {
-		t.Errorf("req.PrevLogTerm = %d, want 0", req.PrevLogTerm)
+	if req.req.PrevLogTerm != 0 {
+		t.Errorf("req.PrevLogTerm = %d, want 0", req.req.PrevLogTerm)
 	}
-	if diff := cmp.Diff(originalLog, req.Entries); diff != "" {
+	if diff := cmp.Diff(originalLog, req.req.Entries); diff != "" {
 		t.Errorf("req.Entries mismatch (-want +got):\n%s", diff)
 	}
-	if newIndex != 3 {
-		t.Errorf("newIndex = %d, want 2", newIndex)
+	if req.newMatchIndex != 2 {
+		t.Errorf("newIndex = %d, want 2", req.newMatchIndex)
+	}
+	if req.newNextIndex != 3 {
+		t.Errorf("newIndex = %d, want 3", req.newNextIndex)
 	}
 }
 
@@ -49,7 +52,8 @@ func TestNextAEReqForPeer_EmptyLog_PeerAtOne(t *testing.T) {
 	raftSrv.state.commitIndex = 0
 	raftSrv.state.nextIndex[2] = 1
 
-	req, newIndex := raftSrv.nextAEReqForPeer(2)
+	nextReq := raftSrv.nextAEReqForPeer(2)
+	req := nextReq.req
 
 	if req.Term != 5 {
 		t.Errorf("req.Term = %d, want 5", req.Term)
@@ -69,8 +73,11 @@ func TestNextAEReqForPeer_EmptyLog_PeerAtOne(t *testing.T) {
 	if diff := cmp.Diff([]*LogEntry{}, req.Entries); diff != "" {
 		t.Errorf("req.Entries mismatch (-want +got):\n%s", diff)
 	}
-	if newIndex != 1 {
-		t.Errorf("newIndex = %d, want 0", newIndex)
+	if nextReq.newMatchIndex != 0 {
+		t.Errorf("newMatchIndex = %d, want 0", nextReq.newMatchIndex)
+	}
+	if nextReq.newNextIndex != 1 {
+		t.Errorf("newNextIndex = %d, want 1", nextReq.newNextIndex)
 	}
 }
 
@@ -89,7 +96,8 @@ func TestNextAEReqForPeer_WithEntries_PeerUpToDate(t *testing.T) {
 	}}
 	raftSrv.state.nextIndex[2] = 3 // next index is beyond log (peer is caught up)
 
-	req, newIndex := raftSrv.nextAEReqForPeer(2)
+	nextReq := raftSrv.nextAEReqForPeer(2)
+	req := nextReq.req
 
 	if req.Term != 3 {
 		t.Errorf("req.Term = %d, want 3", req.Term)
@@ -106,8 +114,11 @@ func TestNextAEReqForPeer_WithEntries_PeerUpToDate(t *testing.T) {
 	if diff := cmp.Diff([]*LogEntry{}, req.Entries); diff != "" {
 		t.Errorf("req.Entries mismatch (-want +got):\n%s", diff)
 	}
-	if newIndex != 3 {
-		t.Errorf("newIndex = %d, want 2", newIndex)
+	if nextReq.newMatchIndex != 2 {
+		t.Errorf("newMatchIndex = %d, want 2", nextReq.newNextIndex)
+	}
+	if nextReq.newNextIndex != 3 {
+		t.Errorf("newNextIndex = %d, want 3", nextReq.newNextIndex)
 	}
 }
 
@@ -128,7 +139,8 @@ func TestNextAEReqForPeer_WithEntries_PeerNeedsUpdates(t *testing.T) {
 	raftSrv.state.nextIndex[2] = 2 // peer needs entries 2 and 3
 	wantEntries := raftSrv.state.log.log[1:]
 
-	req, newIndex := raftSrv.nextAEReqForPeer(2)
+	nextReq := raftSrv.nextAEReqForPeer(2)
+	req := nextReq.req
 
 	if req.Term != 3 {
 		t.Errorf("req.Term = %d, want 3", req.Term)
@@ -142,8 +154,11 @@ func TestNextAEReqForPeer_WithEntries_PeerNeedsUpdates(t *testing.T) {
 	if diff := cmp.Diff(wantEntries, req.Entries); diff != "" {
 		t.Errorf("req.Entries mismatch (-want +got):\n%s", diff)
 	}
-	if newIndex != 4 {
-		t.Errorf("newIndex = %d, want 3", newIndex)
+	if nextReq.newMatchIndex != 3 {
+		t.Errorf("newMatchIndex = %d, want 3", nextReq.newMatchIndex)
+	}
+	if nextReq.newNextIndex != 4 {
+		t.Errorf("newNextIndex = %d, want 4", nextReq.newNextIndex)
 	}
 }
 
@@ -161,7 +176,8 @@ func TestNextAEReqForPeer_PeerAtZero(t *testing.T) {
 	raftSrv.state.log = RaftLog{originalLog}
 	raftSrv.state.nextIndex[2] = 0 // invalid state
 
-	req, newIndex := raftSrv.nextAEReqForPeer(2)
+	nextReq := raftSrv.nextAEReqForPeer(2)
+	req := nextReq.req
 
 	// nextIndex = 0 means we need to send all entries
 	if req.PrevLogIndex != 0 {
@@ -173,7 +189,10 @@ func TestNextAEReqForPeer_PeerAtZero(t *testing.T) {
 	if diff := cmp.Diff(originalLog, req.Entries); diff != "" {
 		t.Errorf("req.Entries mismatch (-want +got):\n%s", diff)
 	}
-	if newIndex != 3 {
-		t.Errorf("newIndex = %d, want 2", newIndex)
+	if nextReq.newMatchIndex != 2 {
+		t.Errorf("newMatchIndex = %d, want 2", nextReq.newMatchIndex)
+	}
+	if nextReq.newNextIndex != 3 {
+		t.Errorf("newNextIndex = %d, want 3", nextReq.newNextIndex)
 	}
 }
