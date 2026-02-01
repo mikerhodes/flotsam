@@ -11,6 +11,10 @@ import (
 	"github.com/google/go-cmp/cmp"
 )
 
+//
+// HELPERS
+//
+
 // CountingStateMachine counts the number of applies
 type CountingStateMachine struct {
 	count atomic.Int32
@@ -20,6 +24,34 @@ type CountingStateMachine struct {
 func (sm *CountingStateMachine) apply(_ []byte) {
 	sm.count.Add(1)
 }
+
+// countingAETransport counts the number of AppendEntries requests
+// sent over the transport, otherwise returning true.
+type countingAETransport struct {
+	sync.Mutex
+	receivedAERequests int
+}
+
+// makeRequestVoteRequest returns a hardcoded vote.
+func (r *countingAETransport) makeRequestVoteRequest(
+	_ context.Context, _ ServerId, requestVote RequestVoteReq,
+) (*RequestVoteRes, error) {
+	return &RequestVoteRes{Term: requestVote.Term, VoteGranted: false}, nil
+}
+
+// makeHeartbeatRequest counts sent AE requests
+func (r *countingAETransport) makeHeartbeatRequest(
+	_ context.Context, _ ServerId, appendEntries AppendEntriesReq,
+) (*AppendEntriesRes, error) {
+	r.Lock()
+	defer r.Unlock()
+	r.receivedAERequests++
+	return &AppendEntriesRes{Term: appendEntries.Term, Success: true}, nil
+}
+
+//
+// BEGIN TESTS
+//
 
 func TestClientCommandAcceptance(t *testing.T) {
 	tests := []struct {
@@ -59,43 +91,7 @@ func TestClientCommandAcceptance(t *testing.T) {
 	}
 }
 
-// mockVoter is an rpcOutgoingTransport that allows sending a
-// sequence of votes to the raft server.
-type mockCommandReceiver struct {
-	sync.Mutex
-	receivedAERequests int
-	acceptAE           bool
-}
-
-// makeRequestVoteRequest returns a hardcoded vote.
-func (r *mockCommandReceiver) makeRequestVoteRequest(
-	ctx context.Context,
-	peer ServerId,
-	requestVote RequestVoteReq,
-) (*RequestVoteRes, error) {
-	return &RequestVoteRes{
-		Term:        requestVote.Term,
-		VoteGranted: false,
-	}, nil
-}
-
-// makeHeartbeatRequest counts sent AE requests
-func (r *mockCommandReceiver) makeHeartbeatRequest(
-	ctx context.Context,
-	peer ServerId,
-	appendEntries AppendEntriesReq,
-) (*AppendEntriesRes, error) {
-	r.Lock()
-	defer r.Unlock()
-
-	r.receivedAERequests++
-	return &AppendEntriesRes{
-		Term:    appendEntries.Term,
-		Success: r.acceptAE,
-	}, nil
-}
-
-func TestWritingSingleCommand(t *testing.T) {
+func TestWritingSingleCommandToPeers(t *testing.T) {
 
 	nPeers := 2
 
@@ -105,7 +101,7 @@ func TestWritingSingleCommand(t *testing.T) {
 			peers[i] = ServerId(i)
 		}
 
-		mockC := &mockCommandReceiver{acceptAE: true}
+		mockC := &countingAETransport{}
 		countingSM := &CountingStateMachine{}
 
 		raftSrv, err := NewRaftServer(1, peers, t.TempDir(), countingSM)
@@ -134,7 +130,7 @@ func TestWritingSingleCommand(t *testing.T) {
 		}}, raftSrv.state.log.log); diff != "" {
 			t.Errorf("log mismatch (-want +got):\n%s", diff)
 		}
-		if raftSrv.state.commitIndex != 1 { // advance as got all true responses
+		if raftSrv.state.commitIndex != 1 {
 			t.Errorf("commitIndex == %d, wanted 1", raftSrv.state.commitIndex)
 		}
 		if countingSM.count.Load() != 1 {
@@ -146,7 +142,7 @@ func TestWritingSingleCommand(t *testing.T) {
 // TestWritingManyCommands writes many commands to the raft server
 // and checks the peers receive requests for them, and that we
 // apply them to the state machine.
-func TestWritingManyCommands(t *testing.T) {
+func TestWritingManyCommandsToPeers(t *testing.T) {
 
 	nPeers := 2
 	var writes int32 = 23
@@ -157,7 +153,7 @@ func TestWritingManyCommands(t *testing.T) {
 			peers[i] = ServerId(i)
 		}
 
-		mockC := &mockCommandReceiver{acceptAE: true}
+		mockC := &countingAETransport{}
 		countingSM := &CountingStateMachine{}
 
 		raftSrv, err := NewRaftServer(1, peers, t.TempDir(), countingSM)
@@ -170,7 +166,7 @@ func TestWritingManyCommands(t *testing.T) {
 
 		for range writes {
 			raftSrv.processClientCommand(ClientCommandReq{
-				Command: []byte{1, 2, 3},
+				Command: []byte{1},
 			})
 			synctest.Wait()
 		}
@@ -181,13 +177,12 @@ func TestWritingManyCommands(t *testing.T) {
 			t.Errorf("mockC.receivedAERequests = %d, want %d",
 				mockC.receivedAERequests, nPeers*int(writes))
 		}
-		if diff := cmp.Diff(slices.Repeat([]*LogEntry{{
-			Term:    1,
-			Command: []byte{1, 2, 3},
-		}}, int(writes)), raftSrv.state.log.log); diff != "" {
+		if diff := cmp.Diff(
+			slices.Repeat([]*LogEntry{{Term: 1, Command: []byte{1}}}, int(writes)),
+			raftSrv.state.log.log); diff != "" {
 			t.Errorf("log mismatch (-want +got):\n%s", diff)
 		}
-		if raftSrv.state.commitIndex != LogIndex(writes) { // advance as got all true responses
+		if raftSrv.state.commitIndex != LogIndex(writes) {
 			t.Errorf("commitIndex == %d, wanted %d", raftSrv.state.commitIndex, writes)
 		}
 		if countingSM.count.Load() != writes {
