@@ -16,8 +16,16 @@ import (
 	"github.com/google/go-cmp/cmp"
 )
 
+// NoopStateMachine is a StateMachine implementation that does
+// nothing, for use in tests that don't need a real state machine.
+type NoopStateMachine struct {
+}
+
+// apply implements StateMachine
+func (sm *NoopStateMachine) apply(_ []byte) {}
+
 func TestRaftServerStartsFollower(t *testing.T) {
-	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir())
+	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir(), &NoopStateMachine{})
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
@@ -31,7 +39,7 @@ func TestRaftServerStartsFollower(t *testing.T) {
 //
 
 func TestAEGreaterTermIncreasesReceiversTerm(t *testing.T) {
-	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir())
+	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir(), &NoopStateMachine{})
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
@@ -57,7 +65,7 @@ func TestAEGreaterTermIncreasesReceiversTerm(t *testing.T) {
 }
 
 func TestAELowerTermDoesNotChangeReceiversTerm(t *testing.T) {
-	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir())
+	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir(), &NoopStateMachine{})
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
@@ -81,7 +89,7 @@ func TestAELowerTermDoesNotChangeReceiversTerm(t *testing.T) {
 }
 
 func TestAEAdvancesElectionDeadline(t *testing.T) {
-	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir())
+	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir(), &NoopStateMachine{})
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
@@ -106,7 +114,7 @@ func TestAEAdvancesElectionDeadline(t *testing.T) {
 }
 
 func TestAEGreaterTermMakesReceiverFollower(t *testing.T) {
-	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir())
+	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir(), &NoopStateMachine{})
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
@@ -147,7 +155,7 @@ func TestAELeaderAppendsFirstLogEntries(t *testing.T) {
 		{Term: 1, Command: []byte{3, 4}},
 	}
 
-	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir())
+	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir(), &NoopStateMachine{})
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
@@ -183,7 +191,7 @@ func TestAEOutOfDateLeaderDoesNotAppendLogEntries(t *testing.T) {
 		{Term: 1, Command: []byte{1, 2}},
 	}
 
-	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir())
+	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir(), &NoopStateMachine{})
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
@@ -230,7 +238,7 @@ func TestAEMatchingprevLogIndexLogDoesAppendLogEntries(t *testing.T) {
 	}
 	expected := slices.Concat(originalLog, newEntries)
 
-	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir())
+	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir(), &NoopStateMachine{})
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
@@ -267,7 +275,7 @@ func TestAEMismatchedprevLogIndexLogDoesntAppend(t *testing.T) {
 	}
 	expected := originalLog
 
-	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir())
+	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir(), &NoopStateMachine{})
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
@@ -304,7 +312,7 @@ func TestAEMismatchedLogAtprevLogIndexDoesntAppend(t *testing.T) {
 	}
 	expected := originalLog
 
-	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir())
+	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir(), &NoopStateMachine{})
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
@@ -341,7 +349,7 @@ func TestAELogAtUnknownprevLogIndexDoesntAppend(t *testing.T) {
 	}
 	expected := originalLog
 
-	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir())
+	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir(), &NoopStateMachine{})
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
@@ -381,7 +389,7 @@ func TestAEAppendOnlyNewEntries(t *testing.T) {
 	}
 	expected := slices.Concat(originalLog, newEntries[2:])
 
-	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir())
+	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir(), &NoopStateMachine{})
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
@@ -418,7 +426,7 @@ func TestAEAppendOnlyNewEntriesNoNewEntries(t *testing.T) {
 	}
 	expected := originalLog
 
-	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir())
+	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir(), &NoopStateMachine{})
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
@@ -460,7 +468,7 @@ func TestAETruncateAndAddAllNewEntries(t *testing.T) {
 	}
 	expected := slices.Concat(originalLog[:2], newEntries)
 
-	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir())
+	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir(), &NoopStateMachine{})
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
@@ -501,7 +509,7 @@ func TestAETruncateAndOnlyAddNewEntries(t *testing.T) {
 	}
 	expected := slices.Concat(originalLog[:2], newEntries[1:])
 
-	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir())
+	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir(), &NoopStateMachine{})
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
@@ -538,7 +546,7 @@ func TestAELeaderCommitUpdatesCommitIndex(t *testing.T) {
 		{Term: 3, Command: []byte{3, 1}},
 	}
 
-	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir())
+	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir(), &NoopStateMachine{})
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
@@ -572,7 +580,7 @@ func TestAELeaderCommitCappedByLogLength(t *testing.T) {
 		{Term: 1, Command: []byte{1, 2}},
 	}
 
-	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir())
+	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir(), &NoopStateMachine{})
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
@@ -607,7 +615,7 @@ func TestAELeaderCommitNotUpdatedWhenLower(t *testing.T) {
 		{Term: 3, Command: []byte{3, 2}},
 	}
 
-	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir())
+	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir(), &NoopStateMachine{})
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
@@ -635,7 +643,7 @@ func TestAELeaderCommitNotUpdatedWhenLower(t *testing.T) {
 func TestAELeaderCommitUpdatedAfterAppendingEntries(t *testing.T) {
 	// Verify commitIndex reflects log length *after* new entries
 	// are appended, not before.
-	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir())
+	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir(), &NoopStateMachine{})
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
@@ -679,7 +687,7 @@ func TestLogPersistedToStateFile(t *testing.T) {
 		{Term: 3, Command: []byte{3, 1}},
 	}
 
-	raftSrv, err := NewRaftServer(1, []ServerId{}, stateDir)
+	raftSrv, err := NewRaftServer(1, []ServerId{}, stateDir, &NoopStateMachine{})
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}

@@ -34,7 +34,7 @@ func NewHarness(t *testing.T, n int) *Harness {
 			t.Fatalf("NewHttpTransport failed: %v", err)
 		}
 		stateDir := t.TempDir()
-		raftSrv, err := NewRaftServer(id, filter(serverIds, id), stateDir)
+		raftSrv, err := NewRaftServer(id, filter(serverIds, id), stateDir, &NoopStateMachine{})
 		if err != nil {
 			t.Fatalf("NewRaftServer failed: %v", err)
 		}
@@ -122,7 +122,7 @@ func (h *Harness) Restart(id ServerId) error {
 		return fmt.Errorf("Tried to restart server already running: %d", id)
 	}
 	var err error
-	newRaftServer, err := NewRaftServer(id, filter(h.serverIds, id), h.stateDirs[id])
+	newRaftServer, err := NewRaftServer(id, filter(h.serverIds, id), h.stateDirs[id], &NoopStateMachine{})
 	newRaftServer.transport = h.transports[id] // reuse transport
 	if err != nil {
 		return fmt.Errorf("Error creating new server for leaderID %d", id)
