@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -506,6 +505,10 @@ func (r *RaftServer) processAppendEntriesRequest(appendEntries AppendEntriesReq)
 		r.state.commitIndex = min(
 			appendEntries.LeaderCommit, r.state.log.LastLogIndex(),
 		)
+		// TODO apply to state machine
+		// apply log[lastApplied] to state machine
+		// and those unapplied log entries before it
+		r.state.lastApplied = r.state.commitIndex
 	}
 
 	return &AppendEntriesRes{Term: r.state.currentTerm, Success: true}
@@ -533,6 +536,7 @@ func (r *RaftServer) processClientCommand(
 		Command: command.Command,
 	}}
 	r.state.log.Append(newEntries)
+	waitForLogIndex := r.state.log.LastLogIndex()
 
 	peers := slices.Clone(r.state.peers)
 
@@ -542,21 +546,42 @@ func (r *RaftServer) processClientCommand(
 	// If we have peers, we need to wait for a majority to
 	// accept before returning.
 	if len(peers) > 0 {
-		success := atomic.Int32{}
-		successRequired := len(peers)/2 + 1
-		done := make(chan struct{})
 		for _, peer := range peers {
 			go func() {
 				r.catchUpPeer(peer)
-
-				log.Printf("[%d] Successfully replicated to %d", r.serverId, peer)
-				if int(success.Add(1)) >= successRequired {
-					close(done)
-				}
 			}()
 		}
+	} else {
+		// Apply updated commitIndex if it's only one server
+		r.state.Lock()
+		r.state.commitIndex = calculateUpdatedCommitIndex(
+			r.serverId,
+			r.state.currentTerm,
+			r.state.commitIndex,
+			r.state.matchIndex,
+			&r.state.log,
+		)
+		if r.state.commitIndex > r.state.lastApplied {
+			// TODO apply to state machine
+			// apply log[lastApplied] to state machine
+			// and those unapplied log entries before it
+			r.state.lastApplied = r.state.commitIndex
+		}
+		r.state.Unlock()
+	}
 
-		<-done
+	// Only respond after lastApplied >= log index *for this
+	// client command*. We should use something like a sync.Cond
+	// rather than a for + sleep, but for now okay.
+	r.state.Lock()
+	la := r.state.lastApplied
+	r.state.Unlock()
+	for !(la >= waitForLogIndex) {
+		time.Sleep(1 * time.Millisecond)
+
+		r.state.Lock()
+		la = r.state.lastApplied
+		r.state.Unlock()
 	}
 
 	return &ClientCommandRes{
@@ -608,21 +633,27 @@ func (r *RaftServer) catchUpPeer(
 		r.state.Lock()
 		r.state.nextIndex[peer] = nextReq.newNextIndex
 		r.state.matchIndex[peer] = nextReq.newMatchIndex
-		r.state.commitIndex = maybeUpdatedCommitIndex(
+		r.state.commitIndex = calculateUpdatedCommitIndex(
 			r.serverId,
 			r.state.currentTerm,
 			r.state.commitIndex,
 			r.state.matchIndex,
 			&r.state.log,
 		)
+		if r.state.commitIndex > r.state.lastApplied {
+			// TODO apply to state machine
+			// apply log[lastApplied] to state machine
+			// and those unapplied log entries before it
+			r.state.lastApplied = r.state.commitIndex
+		}
 		r.state.Unlock()
 	}
 }
 
-// maybeUpdatedCommitIndex will advance the commit index if enough
+// calculateUpdatedCommitIndex will advance the commit index if enough
 // peers are beyond the current index.
 // The state lock must be held when calling this function.
-func maybeUpdatedCommitIndex(
+func calculateUpdatedCommitIndex(
 	serverId ServerId,
 	currentTerm Term,
 	currentCommitIndex LogIndex,
