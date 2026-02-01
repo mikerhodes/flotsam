@@ -41,6 +41,12 @@ type rpcOutgoingTransport interface {
 	) (*AppendEntriesRes, error)
 }
 
+// StateMachine
+type StateMachine interface {
+	// apply applies command to this state machine
+	apply(command []byte)
+}
+
 // noVote is a sentinel server ID for state.votedFor, representing
 // no candidate has been voted on this term.
 const noVote = -1
@@ -109,6 +115,27 @@ func (rl *RaftLog) SliceFrom(idx LogIndex) []*LogEntry {
 		return []*LogEntry{}
 	}
 	return rl.log[idx-1:]
+}
+
+// Slice returns a half-open slice from the log
+func (rl RaftLog) Slice(s LogIndex, e LogIndex) []*LogEntry {
+	log.Printf("s %d, e %d", s, e)
+	if e < 1 {
+		return []*LogEntry{}
+	}
+	if s > e {
+		return []*LogEntry{}
+	}
+	if int(s) > len(rl.log) {
+		return []*LogEntry{}
+	}
+
+	// clamp start and end
+	s = max(s, 1)
+	e = min(e, rl.LastLogIndex()+1) // +1 as slice is half-open
+
+	// Only convert to zero-based now
+	return rl.log[s-1 : e-1]
 }
 
 func (rl *RaftLog) Truncate(idx LogIndex) {
@@ -262,6 +289,9 @@ type RaftServer struct {
 	// serverId is read-only server ID
 	serverId ServerId
 
+	// stateMachine is the external state machine
+	stateMachine StateMachine
+
 	// transport must be assigned before calling Start
 	transport rpcOutgoingTransport
 
@@ -271,7 +301,7 @@ type RaftServer struct {
 	exited chan struct{}
 }
 
-func NewRaftServer(serverId ServerId, peers []ServerId, stateDir string) (*RaftServer, error) {
+func NewRaftServer(serverId ServerId, peers []ServerId, stateDir string, stateMachine StateMachine) (*RaftServer, error) {
 	if serverId < 0 {
 		return nil, errors.New("serverId must be >0")
 	}
@@ -291,10 +321,11 @@ func NewRaftServer(serverId ServerId, peers []ServerId, stateDir string) (*RaftS
 			electionDeadline: electionDeadline,
 			nextHeartbeat:    nextHeartbeat,
 		},
-		stateDir: stateDir,
-		serverId: serverId,
-		stop:     make(chan struct{}),
-		exited:   make(chan struct{}),
+		stateDir:     stateDir,
+		serverId:     serverId,
+		stateMachine: stateMachine,
+		stop:         make(chan struct{}),
+		exited:       make(chan struct{}),
 	}, nil
 }
 
@@ -505,13 +536,21 @@ func (r *RaftServer) processAppendEntriesRequest(appendEntries AppendEntriesReq)
 		r.state.commitIndex = min(
 			appendEntries.LeaderCommit, r.state.log.LastLogIndex(),
 		)
-		// TODO apply to state machine
-		// apply log[lastApplied] to state machine
-		// and those unapplied log entries before it
-		r.state.lastApplied = r.state.commitIndex
+		r.catchUpStateMachine()
 	}
 
 	return &AppendEntriesRes{Term: r.state.currentTerm, Success: true}
+}
+
+// catchUpStateMachine applies log entries from lastApplied
+// to commitIndex, advancing lastApplied to match commitIndex when
+// complete.
+func (r *RaftServer) catchUpStateMachine() {
+	entries := r.state.log.Slice(r.state.lastApplied+1, r.state.commitIndex+1)
+	for _, e := range entries {
+		r.stateMachine.apply(e.Command)
+	}
+	r.state.lastApplied = r.state.commitIndex
 }
 
 // processClientCommand adds command to log, and blocks until a
@@ -562,10 +601,7 @@ func (r *RaftServer) processClientCommand(
 			&r.state.log,
 		)
 		if r.state.commitIndex > r.state.lastApplied {
-			// TODO apply to state machine
-			// apply log[lastApplied] to state machine
-			// and those unapplied log entries before it
-			r.state.lastApplied = r.state.commitIndex
+			r.catchUpStateMachine()
 		}
 		r.state.Unlock()
 	}
@@ -641,10 +677,7 @@ func (r *RaftServer) catchUpPeer(
 			&r.state.log,
 		)
 		if r.state.commitIndex > r.state.lastApplied {
-			// TODO apply to state machine
-			// apply log[lastApplied] to state machine
-			// and those unapplied log entries before it
-			r.state.lastApplied = r.state.commitIndex
+			r.catchUpStateMachine()
 		}
 		r.state.Unlock()
 	}

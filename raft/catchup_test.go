@@ -41,7 +41,7 @@ func (m *mockTransportCapturingAE) makeHeartbeatRequest(
 
 func TestCatchUpPeerDoesNothingWhenNotLeader(t *testing.T) {
 	peers := []ServerId{2}
-	raftSrv, err := NewRaftServer(1, peers, t.TempDir())
+	raftSrv, err := NewRaftServer(1, peers, t.TempDir(), &NoopStateMachine{})
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestCatchUpPeerDoesNothingWhenNotLeader(t *testing.T) {
 
 func TestCatchUpPeerDoesNothingWhenPeerUpToDate(t *testing.T) {
 	peers := []ServerId{2}
-	raftSrv, err := NewRaftServer(1, peers, t.TempDir())
+	raftSrv, err := NewRaftServer(1, peers, t.TempDir(), &NoopStateMachine{})
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestCatchUpPeerDoesNothingWhenPeerUpToDate(t *testing.T) {
 
 func TestCatchUpPeerSendsCorrectAppendEntries(t *testing.T) {
 	peerId := ServerId(2)
-	raftSrv, err := NewRaftServer(1, []ServerId{peerId}, t.TempDir())
+	raftSrv, err := NewRaftServer(1, []ServerId{peerId}, t.TempDir(), &NoopStateMachine{})
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestCatchUpPeerSendsCorrectAppendEntries(t *testing.T) {
 
 func TestCatchUpPeerRetriesOnFailure(t *testing.T) {
 	peerId := ServerId(2)
-	raftSrv, err := NewRaftServer(1, []ServerId{peerId}, t.TempDir())
+	raftSrv, err := NewRaftServer(1, []ServerId{peerId}, t.TempDir(), &NoopStateMachine{})
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}

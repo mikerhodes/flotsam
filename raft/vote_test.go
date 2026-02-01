@@ -20,7 +20,7 @@ import (
 )
 
 func TestRVFollowerGrantsVote(t *testing.T) {
-	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir())
+	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir(), &NoopStateMachine{})
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestRVFollowerGrantsVote(t *testing.T) {
 }
 
 func TestRVLeaderGrantsVoteBecomesFollower(t *testing.T) {
-	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir())
+	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir(), &NoopStateMachine{})
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestRVLeaderGrantsVoteBecomesFollower(t *testing.T) {
 }
 
 func TestRVFollowerGrantsOnlyOneVote(t *testing.T) {
-	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir())
+	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir(), &NoopStateMachine{})
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestRVFollowerGrantsOnlyOneVote(t *testing.T) {
 }
 
 func TestRVFollowerRejectsVoteOldTerm(t *testing.T) {
-	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir())
+	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir(), &NoopStateMachine{})
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
@@ -212,7 +212,7 @@ func TestRaftLogAheadOf(t *testing.T) {
 // TestRVFollowerRejectsVoteCandidateLogBehind tests Section 5.4.1: a voter
 // rejects a candidate whose log is behind the voter's log.
 func TestRVFollowerRejectsVoteCandidateLogBehind(t *testing.T) {
-	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir())
+	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir(), &NoopStateMachine{})
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
@@ -278,7 +278,7 @@ func (r *mockVoter) makeHeartbeatRequest(
 // - matchIndex[]: initialized to 0
 func TestBecomeLeaderInitializesNextIndexAndMatchIndex(t *testing.T) {
 	peers := []ServerId{2, 3, 4}
-	raftSrv, err := NewRaftServer(1, peers, t.TempDir())
+	raftSrv, err := NewRaftServer(1, peers, t.TempDir(), &NoopStateMachine{})
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
@@ -310,7 +310,7 @@ func TestBecomeLeaderInitializesNextIndexAndMatchIndex(t *testing.T) {
 // when the log is empty.
 func TestBecomeLeaderInitializesNextIndexEmptyLog(t *testing.T) {
 	peers := []ServerId{2, 3}
-	raftSrv, err := NewRaftServer(1, peers, t.TempDir())
+	raftSrv, err := NewRaftServer(1, peers, t.TempDir(), &NoopStateMachine{})
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
@@ -349,7 +349,7 @@ func TestServerElection(t *testing.T) {
 					peers[i] = ServerId(i)
 				}
 
-				raftSrv, err := NewRaftServer(1, peers, t.TempDir())
+				raftSrv, err := NewRaftServer(1, peers, t.TempDir(), &NoopStateMachine{})
 				if err != nil {
 					t.Fatalf("NewRaftServer failed: %v", err)
 				}
@@ -408,7 +408,7 @@ func (r *mockVoterCapturingReq) makeHeartbeatRequest(
 func TestElectionSendsCorrectLogInfo(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		peers := []ServerId{2}
-		raftSrv, err := NewRaftServer(1, peers, t.TempDir())
+		raftSrv, err := NewRaftServer(1, peers, t.TempDir(), &NoopStateMachine{})
 		if err != nil {
 			t.Fatalf("NewRaftServer failed: %v", err)
 		}

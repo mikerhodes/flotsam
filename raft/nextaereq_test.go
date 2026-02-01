@@ -9,7 +9,7 @@ import (
 func TestNextAEReqForPeer_PeerAtOne(t *testing.T) {
 	// When nextIndex is 1 (peer needs all entries),
 	// should return all entries with prevLogIndex=0
-	raftSrv, err := NewRaftServer(1, []ServerId{2}, t.TempDir())
+	raftSrv, err := NewRaftServer(1, []ServerId{2}, t.TempDir(), &NoopStateMachine{})
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
@@ -44,7 +44,7 @@ func TestNextAEReqForPeer_PeerAtOne(t *testing.T) {
 func TestNextAEReqForPeer_EmptyLog_PeerAtOne(t *testing.T) {
 	// When log is empty and nextIndex is 1 (initialized state),
 	// should return empty entries and prevLogIndex=0
-	raftSrv, err := NewRaftServer(1, []ServerId{2}, t.TempDir())
+	raftSrv, err := NewRaftServer(1, []ServerId{2}, t.TempDir(), &NoopStateMachine{})
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestNextAEReqForPeer_EmptyLog_PeerAtOne(t *testing.T) {
 func TestNextAEReqForPeer_WithEntries_PeerUpToDate(t *testing.T) {
 	// When log has entries and nextIndex is at end (peer is up to date),
 	// should return empty entries (heartbeat)
-	raftSrv, err := NewRaftServer(1, []ServerId{2}, t.TempDir())
+	raftSrv, err := NewRaftServer(1, []ServerId{2}, t.TempDir(), &NoopStateMachine{})
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestNextAEReqForPeer_WithEntries_PeerUpToDate(t *testing.T) {
 func TestNextAEReqForPeer_WithEntries_PeerNeedsUpdates(t *testing.T) {
 	// When log has entries and nextIndex is behind (peer needs entries),
 	// should return entries from nextIndex onwards
-	raftSrv, err := NewRaftServer(1, []ServerId{2}, t.TempDir())
+	raftSrv, err := NewRaftServer(1, []ServerId{2}, t.TempDir(), &NoopStateMachine{})
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestNextAEReqForPeer_WithEntries_PeerNeedsUpdates(t *testing.T) {
 }
 
 func TestNextAEReqForPeer_PeerAtZero(t *testing.T) {
-	raftSrv, err := NewRaftServer(1, []ServerId{2}, t.TempDir())
+	raftSrv, err := NewRaftServer(1, []ServerId{2}, t.TempDir(), &NoopStateMachine{})
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
