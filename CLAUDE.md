@@ -20,7 +20,7 @@ go test -run TestName ./raft  # Run a specific test
 The Raft implementation is in the `raft/` package:
 
 - **rpc.go**: Core Raft consensus logic
-- **httpserver.go**: HTTP transport layer for inter-node RPC
+- **httptransport.go**: HTTP transport layer for inter-node RPC
 
 ### Core Types (rpc.go)
 
@@ -30,7 +30,7 @@ The Raft implementation is in the `raft/` package:
 - **StateMachine**: Interface for applying committed log entries to external state
 - **Roles**: Follower, Candidate, Leader (RaftRole enum)
 
-### Transport Layer (httpserver.go)
+### Transport Layer (httptransport.go)
 
 - **HttpTransport**: HTTP server and client for Raft RPC
 - **rpcOutgoingTransport**: Interface for outgoing RPCs (vote requests, heartbeats)
