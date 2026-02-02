@@ -704,3 +704,175 @@ func TestLogPersistedToStateFile(t *testing.T) {
 		t.Errorf("persisted log mismatch (-want +got):\n%s", diff)
 	}
 }
+
+//
+// AppendEntries applies state to state machine
+//
+
+// TestStateMachineNotAppliedWhenCommitSame tests that state machine doesn't
+// have anything applied if the commit index for the leader has not advanced.
+func TestStateMachineNotAppliedWhenCommitSame(t *testing.T) {
+	countingSM := &CountingStateMachine{}
+	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir(), countingSM)
+	if err != nil {
+		t.Fatalf("NewRaftServer failed: %v", err)
+	}
+	// Start with empty log
+	raftSrv.state.commitIndex = 0
+
+	newEntries := []*LogEntry{
+		{Term: 1, Command: []byte{1, 1}},
+		{Term: 1, Command: []byte{1, 2}},
+		{Term: 1, Command: []byte{1, 3}},
+	}
+
+	raftSrv.processAppendEntriesRequest(AppendEntriesReq{
+		Term:         1,
+		LeaderId:     2,
+		PrevLogIndex: 0,
+		PrevLogTerm:  0,
+		Entries:      newEntries,
+		LeaderCommit: 0, // nothing new to commit
+	})
+
+	if countingSM.count.Load() != 0 {
+		t.Errorf("countingSM.count = %d, want 0", countingSM.count.Load())
+	}
+}
+
+// TestStateMachineAppliedOnHeartbeat tests the common state where the
+// server first successfully adds entries to its log, and later receives
+// a heartbeat from the leader to commit them (as the leader sees a
+// majority after the server originally added them to its log).
+func TestStateMachineAppliedOnHeartbeat(t *testing.T) {
+	countingSM := &CountingStateMachine{}
+	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir(), countingSM)
+	if err != nil {
+		t.Fatalf("NewRaftServer failed: %v", err)
+	}
+	// Start with empty log
+	raftSrv.state.commitIndex = 0
+
+	newEntries := []*LogEntry{
+		{Term: 1, Command: []byte{1, 1}},
+		{Term: 1, Command: []byte{1, 2}},
+		{Term: 1, Command: []byte{1, 3}},
+	}
+
+	// Add entries but do not commit, should not apply
+	raftSrv.processAppendEntriesRequest(AppendEntriesReq{
+		Term:         1,
+		LeaderId:     2,
+		PrevLogIndex: 0,
+		PrevLogTerm:  0,
+		Entries:      newEntries,
+		LeaderCommit: 0,
+	})
+	if countingSM.count.Load() != 0 {
+		t.Errorf("countingSM.count = %d, want 0", countingSM.count.Load())
+	}
+
+	// Heartbeat with commit
+	raftSrv.processAppendEntriesRequest(AppendEntriesReq{
+		Term:         1,
+		LeaderId:     2,
+		PrevLogIndex: 3,
+		PrevLogTerm:  1,
+		Entries:      []*LogEntry{},
+		LeaderCommit: 3,
+	})
+	if countingSM.count.Load() != 3 {
+		t.Errorf("countingSM.count = %d, want 3", countingSM.count.Load())
+	}
+}
+
+// TestStateMachineAppliedBySequentialHeartbeats tests that the state machine
+// is applied correctly if it takes several heartbeats to move the commitIndex
+// all the way to the end.
+func TestStateMachineAppliedBySequentialHeartbeats(t *testing.T) {
+	countingSM := &CountingStateMachine{}
+	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir(), countingSM)
+	if err != nil {
+		t.Fatalf("NewRaftServer failed: %v", err)
+	}
+	// Start with empty log
+	raftSrv.state.commitIndex = 0
+
+	newEntries := []*LogEntry{
+		{Term: 1, Command: []byte{1, 1}},
+		{Term: 1, Command: []byte{1, 2}},
+		{Term: 1, Command: []byte{1, 3}},
+	}
+
+	// Add entries but do not commit, should not apply
+	raftSrv.processAppendEntriesRequest(AppendEntriesReq{
+		Term:         1,
+		LeaderId:     2,
+		PrevLogIndex: 0,
+		PrevLogTerm:  0,
+		Entries:      newEntries,
+		LeaderCommit: 0,
+	})
+	if countingSM.count.Load() != 0 {
+		t.Errorf("countingSM.count = %d, want 0", countingSM.count.Load())
+	}
+
+	// Heartbeat with commit for first 2 entries
+	raftSrv.processAppendEntriesRequest(AppendEntriesReq{
+		Term:         1,
+		LeaderId:     2,
+		PrevLogIndex: 3,
+		PrevLogTerm:  1,
+		Entries:      []*LogEntry{},
+		LeaderCommit: 2,
+	})
+	if countingSM.count.Load() != 2 {
+		t.Errorf("countingSM.count = %d, want 2", countingSM.count.Load())
+	}
+	// Heartbeat with commit for last entry
+	raftSrv.processAppendEntriesRequest(AppendEntriesReq{
+		Term:         1,
+		LeaderId:     2,
+		PrevLogIndex: 3,
+		PrevLogTerm:  1,
+		Entries:      []*LogEntry{},
+		LeaderCommit: 3,
+	})
+	if countingSM.count.Load() != 3 {
+		t.Errorf("countingSM.count = %d, want 3", countingSM.count.Load())
+	}
+}
+
+// TestStateMachineAppliedWhenCommitAdvances checks that new entries are
+// applied to the state machine when the leader says they are already
+// committed. This might happen if the server was dead when the log
+// entries were originally written to the log, and the majority was
+// formed from other servers.
+func TestStateMachineAppliedWhenCommitAdvances(t *testing.T) {
+	countingSM := &CountingStateMachine{}
+	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir(), countingSM)
+	if err != nil {
+		t.Fatalf("NewRaftServer failed: %v", err)
+	}
+	// Start with empty log
+	raftSrv.state.commitIndex = 0
+
+	newEntries := []*LogEntry{
+		{Term: 1, Command: []byte{1, 1}},
+		{Term: 1, Command: []byte{1, 2}},
+		{Term: 1, Command: []byte{1, 3}},
+	}
+
+	raftSrv.processAppendEntriesRequest(AppendEntriesReq{
+		Term:         1,
+		LeaderId:     2,
+		PrevLogIndex: 0,
+		PrevLogTerm:  0,
+		Entries:      newEntries,
+		LeaderCommit: 3, // commit all 3 new entries
+	})
+
+	if countingSM.count.Load() != 3 {
+		t.Errorf("countingSM.count = %d, want 3", countingSM.count.Load())
+	}
+}
