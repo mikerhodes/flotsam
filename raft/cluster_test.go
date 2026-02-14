@@ -126,3 +126,41 @@ func TestThreeServersOneLeaderAfterLeaderDies(t *testing.T) {
 	// Clean up
 	harness.ShutdownAll()
 }
+
+func TestThreeServersWriteDataToAllReplicas(t *testing.T) {
+	harness := NewHarness(t, 3)
+	harness.StartAll()
+
+	harness.WaitForOneLeader(t)
+
+	// Write a 100 log entries to the leader and check replicated
+	// to all servers.
+	for raft := range harness.Servers() {
+		if raft.Role() == RaftRoleLeader {
+			for i := range 100 {
+				res := raft.processClientCommand(ClientCommandReq{
+					Command: []byte{byte(i)}, // max i = 100, in range for byte
+				})
+				if !res.Success == true {
+					t.Errorf("Error writing command: %v", res.Err)
+				}
+			}
+			break
+		}
+	}
+	time.Sleep(10 * time.Millisecond)
+	for raft := range harness.Servers() {
+		log := raft.state.log
+		if log.Len() != 100 {
+			t.Errorf("log.Len() == %d, expected 100 for RaftServer %d", log.Len(), raft.serverId)
+		}
+		for i, b := range raft.state.log.SliceFrom(1) {
+			if i != int(b.Command[0]) {
+				t.Errorf("b.Command[0] == %d, expected %d for RaftServer %d at idx %d", b.Command[0], i, raft.serverId, i)
+			}
+		}
+	}
+
+	// Clean up
+	harness.ShutdownAll()
+}
