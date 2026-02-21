@@ -80,9 +80,13 @@ func (h *Harness) ShutdownAll() {
 // WaitForOneLeader waits for there to be a stable cluster,
 // 1 leader and 0 candidates.
 func (h *Harness) WaitForOneLeader(t *testing.T) {
+	// Wait up to 2,000 ms (should be enough for 300ms election timeout max)
+	const sleepLen = 5 * time.Millisecond
+	const waitIterations = 400
+
 	t.Helper()
 	leaders, followers, candidates := 0, 0, 0
-	for range 100 {
+	for range waitIterations {
 		leaders, followers, candidates = 0, 0, 0
 		for _, srv := range h.raftServers {
 			if srv == nil {
@@ -100,7 +104,7 @@ func (h *Harness) WaitForOneLeader(t *testing.T) {
 		if leaders == 1 && candidates == 0 {
 			break
 		}
-		time.Sleep(5 * time.Millisecond)
+		time.Sleep(sleepLen)
 	}
 	if !(leaders == 1 && candidates == 0) {
 		t.Fatalf("got leaders = %d, candidates = %d, wanted 1, 0",
