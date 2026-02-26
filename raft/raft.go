@@ -167,21 +167,21 @@ func (rl *RaftLog) Len() int {
 }
 
 // LastLogIndex returns the last log index.
-func (l *RaftLog) LastLogIndex() LogIndex {
-	return LogIndex(l.Len())
+func (rl *RaftLog) LastLogIndex() LogIndex {
+	return LogIndex(rl.Len())
 }
 
 // AheadOf returns true if this log is ahead of the passed term and index.
 // State lock must be held when calling this method
-func (l *RaftLog) AheadOf(term Term, idx LogIndex) bool {
-	if l.Empty() {
+func (rl *RaftLog) AheadOf(term Term, idx LogIndex) bool {
+	if rl.Empty() {
 		return false
 	}
 
-	entry, _ := l.Get(LogIndex(l.Len()))
+	entry, _ := rl.Get(LogIndex(rl.Len()))
 
 	if entry.Term == term {
-		return idx < LogIndex(l.Len())
+		return idx < LogIndex(rl.Len())
 	} else {
 		return term < entry.Term
 	}
@@ -458,6 +458,33 @@ func (r *RaftServer) becomeLeader() {
 	log.Printf("[%d] became leader, term=%d", r.serverId, r.state.currentTerm)
 }
 
+// prevLogMatches returns true if this server's entry for prevIndex
+// has term prevTerm, or if our log is empty.
+func (r *RaftServer) prevLogMatches(prevIndex LogIndex, prevTerm Term) bool {
+	if prevIndex == 0 && r.state.log.Empty() {
+		return true
+	}
+	entry, found := r.state.log.Get(prevIndex)
+	return found && entry.Term == prevTerm
+}
+
+func (rl *RaftLog) findConflict(
+	startIndex LogIndex,
+	newEntries []*LogEntry,
+) (LogIndex, bool) {
+	for i, newEntry := range newEntries {
+		logIndex := startIndex + LogIndex(i)
+		entry, found := rl.Get(logIndex)
+		if !found { // reached the end of our log
+			return 0, false
+		}
+		if entry.Term != newEntry.Term { // found conflicting entry
+			return logIndex, true
+		}
+	}
+	return 0, false
+}
+
 func (r *RaftServer) processAppendEntriesRequest(appendEntries AppendEntriesReq) *AppendEntriesRes {
 	if r.inShutdown.Load() {
 		return nil
@@ -467,46 +494,26 @@ func (r *RaftServer) processAppendEntriesRequest(appendEntries AppendEntriesReq)
 	defer r.state.Unlock()
 	defer r.persistState()
 
-	ct := r.state.currentTerm
-
 	// Out of date request
-	if appendEntries.Term < ct {
-		return &AppendEntriesRes{Term: ct, Success: false}
+	if appendEntries.Term < r.state.currentTerm {
+		return &AppendEntriesRes{Term: r.state.currentTerm, Success: false}
 	}
 
-	// Request is for current term, bump election deadline
+	// Request is for current term, bump election deadline.
 	r.state.electionDeadline = newElectionDeadline()
 
-	// If we receive an AppendEntries with Term >= currentTerm,
-	// we are definitely not the leader for this term.
-	if appendEntries.Term > ct {
+	// We also know that we are a follower if we receive
+	// an AppendEntries request for the current term or
+	// later one.
+	if appendEntries.Term > r.state.currentTerm ||
+		r.state.role != RaftRoleFollower {
 		r.becomeFollower(appendEntries.Term)
 	}
-	if appendEntries.Term == ct {
-		// While raft guarantees we can't have two leaders for
-		// a term, if we are a candidate we should become
-		// a follower if someone else won.
-		if r.state.role != RaftRoleFollower {
-			r.becomeFollower(appendEntries.Term)
-		}
-	}
-
-	ct = r.state.currentTerm
 
 	// If there are entries, entry at prevLogIndex must match term
 	// prevLogTerm (5.3)
-	if !(appendEntries.PrevLogIndex == 0 && r.state.log.Empty()) {
-		entry, found := r.state.log.Get(appendEntries.PrevLogIndex)
-		if !found {
-			log.Printf("prevLogIndex not found, idx=%d, len(log)=%d",
-				appendEntries.PrevLogIndex, len(r.state.log.Entries()))
-			return &AppendEntriesRes{Term: ct, Success: false}
-		}
-		if entry.Term != appendEntries.PrevLogTerm {
-			log.Printf("prevLogTerm mismatch, prevLogTerm=%d, entry.Term=%d",
-				appendEntries.PrevLogTerm, entry.Term)
-			return &AppendEntriesRes{Term: ct, Success: false}
-		}
+	if !r.prevLogMatches(appendEntries.PrevLogIndex, appendEntries.PrevLogTerm) {
+		return &AppendEntriesRes{Term: r.state.currentTerm, Success: false}
 	}
 
 	// Truncate if we find a mismatched entry (5.3)
@@ -526,28 +533,12 @@ func (r *RaftServer) processAppendEntriesRequest(appendEntries AppendEntriesReq)
 	//    5          6
 	//    5            (we could even have a longer local log)
 	logStartIdx := appendEntries.PrevLogIndex + 1
-	log.Printf("Starting truncate and dedup at logStartIdx=%d", logStartIdx)
-	log.Printf("Log: %v", r.state.log.Entries())
-	appendEntriesIdx := 0
-	for {
-		logIndex := logStartIdx + LogIndex(appendEntriesIdx)
-		entry, found := r.state.log.Get(logIndex)
-		if !found { // reached end of our log
-			log.Printf("Truncate reached end of log at logIndex=%d", logIndex)
-			break
-		}
-		if appendEntriesIdx >= len(appendEntries.Entries) {
-			log.Printf(
-				"Truncate reached end of Entries appendEntriesIdx=%d",
-				appendEntriesIdx)
-			break
-		}
-		if entry.Term != appendEntries.Entries[appendEntriesIdx].Term {
-			log.Printf("Truncating from %d", logIndex)
-			r.state.log.Truncate(logIndex)
-			break
-		}
-		appendEntriesIdx++
+	if idx, hasConflict := r.state.log.findConflict(
+		logStartIdx,
+		appendEntries.Entries,
+	); hasConflict {
+		log.Printf("Truncating from %d", idx)
+		r.state.log.Truncate(idx)
 	}
 
 	// Append any new entries not already in the log. First,
@@ -556,17 +547,17 @@ func (r *RaftServer) processAppendEntriesRequest(appendEntries AppendEntriesReq)
 	// entries either go at the end of our current log,
 	// or that they have matching entries overlapping.
 	// We just need to figure out the length of the
-	// overlap. It'll look something like this (number is
-	// log index, assume terms match due to truncation):
+	// overlap to see what we already have. It'll look
+	// something like this (number is log index, assume
+	// terms match due to truncation):
 	//   log      new entries
 	//    5            (=prevLogIndex)
 	//    6          6 (=prevLogIndex + 1) // discard new
 	//    7          7                     // discard new
 	//               8                     // append
 	//               9                     // append
-	overlap := r.state.log.Len() - int(appendEntries.PrevLogIndex)
-	newEntries := appendEntries.Entries[overlap:]
-	log.Printf("newEntries=%s", newEntries)
+	alreadyHave := r.state.log.Len() - int(appendEntries.PrevLogIndex)
+	newEntries := appendEntries.Entries[alreadyHave:]
 	r.state.log.Append(newEntries)
 
 	if appendEntries.LeaderCommit > r.state.commitIndex {
