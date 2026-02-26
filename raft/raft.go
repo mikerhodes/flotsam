@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -295,6 +296,13 @@ type RaftServer struct {
 	// transport must be assigned before calling Start
 	transport rpcOutgoingTransport
 
+	// inShutdown is true when server is shutting down,
+	// and prevents new calls from starting.
+	inShutdown atomic.Bool
+
+	// inFlightReqs stores the number of inflight requests.
+	inFlightReqs atomic.Int64
+
 	// stop closes when we should stop
 	stop chan struct{}
 	// exited closes when raft ticker loop exits
@@ -343,6 +351,10 @@ func newElectionDeadline() time.Time {
 
 // Start starts the Raft server, and blocks until it is shutdown.
 func (r *RaftServer) Start() {
+	if r.inShutdown.Load() {
+		return
+	}
+
 	// Load persistent state
 	if ps, err := LoadPersistentState(r.stateDir); err == nil {
 		r.state.Lock()
@@ -362,15 +374,36 @@ func (r *RaftServer) Start() {
 			close(r.exited)
 			return
 		case <-t.C:
+			if r.inShutdown.Load() {
+				close(r.exited)
+				return
+			}
 			r.maybeStartElection()
 			r.maybeSendHeartbeats()
 		}
 	}
 }
 
+// Shutdown gracefully shuts down the server.
+// New process* requests will be rejected.
+// Shutdown will block until inflight requests are complete.
 func (r *RaftServer) Shutdown() {
+	// Prevent new process* calls from starting.
+	r.inShutdown.Store(true)
+
+	// Wait for Start loop to exit. This means no new
+	// requests will be made.
 	close(r.stop)
 	<-r.exited
+
+	// Finally, wait for all in-flight requests to complete
+	t := time.NewTicker(2 * time.Millisecond) // expect short requests
+	defer t.Stop()
+	for range t.C {
+		if r.inFlightReqs.Load() == 0 {
+			return
+		}
+	}
 }
 
 // persistState saves the raft persistent state to disk.
@@ -383,7 +416,7 @@ func (r *RaftServer) persistState() {
 	}
 	err := ps.Save(r.stateDir)
 	if err != nil {
-		panic(fmt.Sprintf("Error saving state; panic: %v", err))
+		log.Printf("Error saving state; panic: %v", err)
 	}
 }
 
@@ -426,6 +459,10 @@ func (r *RaftServer) becomeLeader() {
 }
 
 func (r *RaftServer) processAppendEntriesRequest(appendEntries AppendEntriesReq) *AppendEntriesRes {
+	if r.inShutdown.Load() {
+		return nil
+	}
+
 	r.state.Lock()
 	defer r.state.Unlock()
 	defer r.persistState()
@@ -558,6 +595,10 @@ func (r *RaftServer) catchUpStateMachine() {
 func (r *RaftServer) processClientCommand(
 	command ClientCommandReq,
 ) *ClientCommandRes {
+	if r.inShutdown.Load() {
+		return nil
+	}
+
 	// Add entry to our log while holding the lock.
 	// Then try to apply to all followers.
 	r.state.Lock()
@@ -772,6 +813,10 @@ func (r *RaftServer) nextAEReqForPeer(peer ServerId) nextAEReqForPeer {
 }
 
 func (r *RaftServer) processRequestVote(requestVote RequestVoteReq) *RequestVoteRes {
+	if r.inShutdown.Load() {
+		return nil
+	}
+
 	r.state.Lock()
 	defer r.state.Unlock()
 	defer r.persistState()
@@ -912,6 +957,9 @@ func (r *RaftServer) collectVotes(ctx context.Context, electionTerm Term, peers 
 	// Send RequestVote RPCs, ensuring timeout using ctx.
 	for _, peer := range peers {
 		go func() {
+			r.inFlightReqs.Add(1)
+			defer r.inFlightReqs.Add(-1)
+
 			peerResult, err := r.transport.makeRequestVoteRequest(ctx, peer, reqVoteReq)
 			if err != nil {
 				log.Printf("Error requesting vote from %d; assuming false vote: %v", peer, err)
@@ -1002,6 +1050,9 @@ func (r *RaftServer) sendLeaderHeartbeats() {
 	wg := sync.WaitGroup{}
 	for _, peer := range r.state.peers {
 		wg.Go(func() {
+			r.inFlightReqs.Add(1)
+			defer r.inFlightReqs.Add(-1)
+
 			result, err := r.transport.makeHeartbeatRequest(ctx, peer, appendEntriesReq)
 			if err != nil {
 				log.Printf("Error sending heartbeat to %v: %v", peer, err)
@@ -1021,4 +1072,5 @@ func (r *RaftServer) sendLeaderHeartbeats() {
 		})
 	}
 	wg.Wait()
+
 }
