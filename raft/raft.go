@@ -98,10 +98,7 @@ type RaftLog struct {
 }
 
 func (rl *RaftLog) Get(idx LogIndex) (*LogEntry, bool) {
-	if idx < 1 {
-		return nil, false
-	}
-	if int(idx) > len(rl.log) {
+	if idx < 1 || int(idx) > len(rl.log) {
 		return nil, false
 	}
 
@@ -120,7 +117,6 @@ func (rl *RaftLog) SliceFrom(idx LogIndex) []*LogEntry {
 
 // Slice returns a half-open slice from the log
 func (rl RaftLog) Slice(s LogIndex, e LogIndex) []*LogEntry {
-	log.Printf("s %d, e %d", s, e)
 	if e < 1 {
 		return []*LogEntry{}
 	}
@@ -139,7 +135,8 @@ func (rl RaftLog) Slice(s LogIndex, e LogIndex) []*LogEntry {
 	return rl.log[s-1 : e-1]
 }
 
-func (rl *RaftLog) Truncate(idx LogIndex) {
+// TruncateFrom removes all entries from idx and beyond.
+func (rl *RaftLog) TruncateFrom(idx LogIndex) {
 	if idx < 1 {
 		return
 	}
@@ -460,11 +457,11 @@ func (r *RaftServer) becomeLeader() {
 
 // prevLogMatches returns true if this server's entry for prevIndex
 // has term prevTerm, or if our log is empty.
-func (r *RaftServer) prevLogMatches(prevIndex LogIndex, prevTerm Term) bool {
-	if prevIndex == 0 && r.state.log.Empty() {
+func (rl *RaftLog) prevLogMatches(prevIndex LogIndex, prevTerm Term) bool {
+	if prevIndex == 0 && rl.Empty() {
 		return true
 	}
-	entry, found := r.state.log.Get(prevIndex)
+	entry, found := rl.Get(prevIndex)
 	return found && entry.Term == prevTerm
 }
 
@@ -512,7 +509,7 @@ func (r *RaftServer) processAppendEntriesRequest(appendEntries AppendEntriesReq)
 
 	// If there are entries, entry at prevLogIndex must match term
 	// prevLogTerm (5.3)
-	if !r.prevLogMatches(appendEntries.PrevLogIndex, appendEntries.PrevLogTerm) {
+	if !r.state.log.prevLogMatches(appendEntries.PrevLogIndex, appendEntries.PrevLogTerm) {
 		return &AppendEntriesRes{Term: r.state.currentTerm, Success: false}
 	}
 
@@ -538,7 +535,7 @@ func (r *RaftServer) processAppendEntriesRequest(appendEntries AppendEntriesReq)
 		appendEntries.Entries,
 	); hasConflict {
 		log.Printf("Truncating from %d", idx)
-		r.state.log.Truncate(idx)
+		r.state.log.TruncateFrom(idx)
 	}
 
 	// Append any new entries not already in the log. First,
