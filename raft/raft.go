@@ -637,7 +637,7 @@ func (r *RaftServer) appendCommandIfLeader(command []byte) (LogIndex, error) {
 
 // waitForLastAppliedToCatchUp returns when r.state.lastApplied is at
 // least as large as wanted.
-// State lock should _not_ be held when calling this method.
+// Do not call while holding state lock.
 func (r *RaftServer) waitForLastAppliedToCatchUp(wanted LogIndex) {
 	// We should use something like a sync.Cond
 	// rather than a for + sleep, but for now okay.
@@ -655,7 +655,7 @@ func (r *RaftServer) waitForLastAppliedToCatchUp(wanted LogIndex) {
 
 // startPeerCatchUp kicks of async catch up for each peer.
 // Also handles case where there are no peers.
-// State lock should _not_ be held when calling this method.
+// Do not call while holding state lock.
 func (r *RaftServer) startPeerCatchUp() {
 	r.state.Lock()
 	defer r.state.Unlock()
@@ -681,12 +681,12 @@ func (r *RaftServer) catchUpPeer(
 	for {
 		r.state.Lock()
 		if r.state.role != RaftRoleLeader {
-			// no longer leader
+			// No longer leader, so don't send more updates
 			r.state.Unlock()
 			return
 		}
 		if r.state.log.LastLogIndex() < r.state.nextIndex[peer] {
-			// Caught up
+			// Caught up this peer
 			r.state.Unlock()
 			return
 		}
