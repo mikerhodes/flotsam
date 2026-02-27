@@ -19,10 +19,10 @@ go test -run TestName ./raft  # Run a specific test
 
 The Raft implementation is in the `raft/` package:
 
-- **rpc.go**: Core Raft consensus logic
+- **raft.go**: Core Raft consensus logic
 - **httptransport.go**: HTTP transport layer for inter-node RPC
 
-### Core Types (rpc.go)
+### Core Types (raft.go)
 
 - **RaftServer**: Main server struct that manages state and runs the event loop
 - **state**: Thread-safe state container holding Raft persistent and volatile state
@@ -42,7 +42,8 @@ The Raft implementation is in the `raft/` package:
 - **Event Loop**: Ticker-based loop (25ms) in `Start()` checks election deadlines and heartbeat timing
 - **Election**: `maybeStartElection()` → `runElection()` → `collectVotes()`
 - **Heartbeats**: Leader sends via `maybeSendHeartbeats()` → `sendLeaderHeartbeats()`
-- **Log Replication**: `processClientCommand()` → `catchUpPeer()` for each peer
+- **Log Replication**: `processClientCommand()` → `appendCommandIfLeader()` → `startPeerCatchUp()` → `catchUpPeer()` for each peer
+- **Commit Advancement**: `maybeAdvanceCommitIndex()` recalculates commit index and calls `catchUpStateMachine()`
 - **State Machine**: `catchUpStateMachine()` applies committed entries from lastApplied to commitIndex
 
 ### Timing Constants
@@ -56,6 +57,7 @@ The Raft implementation is in the `raft/` package:
 Tests are organized by feature area:
 
 - **appendentry_test.go**: AppendEntries RPC handling, log replication, state machine application
+- **rpc_test.go**: Commit index calculation logic
 - **vote_test.go**: RequestVote RPC, election logic
 - **clientcommand_test.go**: Client command processing
 - **catchup_test.go**: Peer log catch-up during replication
