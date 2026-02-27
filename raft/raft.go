@@ -886,18 +886,24 @@ func (r *RaftServer) maybeStartElection() {
 
 	// Transition to candidate
 	r.state.role = RaftRoleCandidate
-	r.state.currentTerm += 1
+	r.state.currentTerm++
 	r.state.votedFor = r.serverId
 	log.Printf("%d became candidate, term=%d", r.serverId, r.state.currentTerm)
 
+	// Gather state needed for the election
 	peers := slices.Clone(r.state.peers)
 	electionTerm := r.state.currentTerm
+	lastLogTerm := Term(0)
+	entry, found := r.state.log.Get(r.state.log.LastLogIndex())
+	if found {
+		lastLogTerm = entry.Term
+	}
 
 	newDeadline := newElectionDeadline()
 	go func() {
 		ctx, cancel := context.WithDeadline(context.Background(), newDeadline)
 		defer cancel()
-		r.runElection(ctx, electionTerm, peers)
+		r.runElection(ctx, electionTerm, lastLogTerm, peers)
 	}()
 	r.state.electionDeadline = newDeadline
 }
@@ -905,14 +911,8 @@ func (r *RaftServer) maybeStartElection() {
 // runElection runs a single election. We exit this function either as
 // follower, leader or still as a candidate. In the latter state, we
 // run another election.
-func (r *RaftServer) runElection(ctx context.Context, electionTerm Term, peers []ServerId) {
+func (r *RaftServer) runElection(ctx context.Context, electionTerm Term, lastLogTerm Term, peers []ServerId) {
 	log.Printf("[%d] runElection term=%d", r.serverId, electionTerm)
-
-	lastLogTerm := Term(0)
-	entry, found := r.state.log.Get(r.state.log.LastLogIndex())
-	if found {
-		lastLogTerm = entry.Term
-	}
 
 	voteReq := RequestVoteReq{
 		Term:         electionTerm,
@@ -974,19 +974,16 @@ func (r *RaftServer) collectVotes(ctx context.Context, electionTerm Term, peers 
 			defer r.state.Unlock()
 			defer r.persistState()
 
-			log.Printf(
-				"[%d] collectVotes received vote electionTerm=%d, peerResult=%v",
-				r.serverId, electionTerm, peerResult)
-
-			if peerResult.Term > electionTerm {
+			switch {
+			case peerResult.Term > electionTerm:
 				// Time has moved on and a new leader has arisen. Accept
-				// this and become a follower.
+				// this and become a follower. (5.1)
 				r.becomeFollower(peerResult.Term)
 				votes <- false
-			} else if peerResult.Term < electionTerm {
+			case peerResult.Term < electionTerm:
 				// A result from the past, discard it.
 				votes <- false
-			} else {
+			default:
 				// Peer is still in the same term, use its result.
 				votes <- peerResult.VoteGranted
 			}
@@ -1067,7 +1064,7 @@ func (r *RaftServer) sendLeaderHeartbeats() {
 			defer r.state.Unlock()
 			defer r.persistState()
 
-			// Time has moved on, and another leader has likely
+			// Time has moved on, and another leader has
 			// arisen. Accept this, and become a follower. (section 5.1)
 			if result.Term > r.state.currentTerm {
 				r.becomeFollower(result.Term)
@@ -1075,5 +1072,4 @@ func (r *RaftServer) sendLeaderHeartbeats() {
 		})
 	}
 	wg.Wait()
-
 }
