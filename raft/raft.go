@@ -176,12 +176,10 @@ func (rl *RaftLog) AheadOf(term Term, idx LogIndex) bool {
 	}
 
 	entry, _ := rl.Get(LogIndex(rl.Len()))
-
 	if entry.Term == term {
 		return idx < LogIndex(rl.Len())
-	} else {
-		return term < entry.Term
 	}
+	return term < entry.Term
 }
 
 type AppendEntriesReq struct {
@@ -833,47 +831,40 @@ func (r *RaftServer) processRequestVote(requestVote RequestVoteReq) *RequestVote
 	defer r.state.Unlock()
 	defer r.persistState()
 
-	ct := r.state.currentTerm
-
-	// Out of date request
-	if requestVote.Term < ct {
-		log.Printf("[%d] processRequestVote LOWER_TERM electionTerm=%d candidate=%d", r.serverId, requestVote.Term, requestVote.CandidateId)
-		return &RequestVoteRes{Term: ct, VoteGranted: false}
-	}
-
-	// If we are the leader for this term, we need to update the calling
-	// candidate with that fact.
-	if r.state.role == RaftRoleLeader && requestVote.Term == ct {
-		log.Printf("[%d] processRequestVote I_AM_LEADER electionTerm=%d candidate=%d", r.serverId, requestVote.Term, requestVote.CandidateId)
-		return &RequestVoteRes{Term: ct, VoteGranted: false}
-	}
-
-	// Vote is for a newer term, move ourselves to that term and
-	// become a follower before processing. (section 5.1)
-	if requestVote.Term > ct {
+	// Always convert to follower if we receive an RPC with a newer term (5.1)
+	// This also advances our term to match the request's and clears our vote.
+	if requestVote.Term > r.state.currentTerm {
 		r.becomeFollower(requestVote.Term)
 	}
-	ct = r.state.currentTerm
+
+	// Reject stale requests (5.1)
+	if requestVote.Term < r.state.currentTerm {
+		log.Printf("[%d] RequestVote: STALE_TERM candidate=%d term=%d", r.serverId, requestVote.CandidateId, requestVote.Term)
+		return &RequestVoteRes{Term: r.state.currentTerm, VoteGranted: false}
+	}
+
+	// We already won the election for this term, don't grant another candidate a vote (5.2)
+	if r.state.role == RaftRoleLeader && requestVote.Term == r.state.currentTerm {
+		log.Printf("[%d] RequestVote: I_AM_LEADER candidate=%d term=%d", r.serverId, requestVote.CandidateId, requestVote.Term)
+		return &RequestVoteRes{Term: r.state.currentTerm, VoteGranted: false}
+	}
 
 	// Only grant one vote per term (section 5.2)
 	if r.state.votedFor != noVote && r.state.votedFor != requestVote.CandidateId {
-		log.Printf("[%d] processRequestVote ALREADY_VOTED_SOMEONE_ELSE electionTerm=%d candidate=%d", r.serverId, requestVote.Term, requestVote.CandidateId)
-		return &RequestVoteRes{Term: ct, VoteGranted: false}
+		log.Printf("[%d] RequestVote: ALREADY_VOTED candidate=%d term=%d", r.serverId, requestVote.CandidateId, requestVote.Term)
+		return &RequestVoteRes{Term: r.state.currentTerm, VoteGranted: false}
 	}
 
-	// Section 5.4.1 safety property - election restriction
-	// A candidate should not win an election unless its log contains
-	// all committed entries.
+	// Election restriction: candidate's log must be at least as up-to-date (section 5.4.1)
 	if r.state.log.AheadOf(requestVote.LastLogTerm, requestVote.LastLogIndex) {
-		log.Printf(
-			"[%d] processRequestVote TOO_OLD_LOG_TERM LastLogTerm=%d",
-			r.serverId, requestVote.LastLogTerm)
-		return &RequestVoteRes{Term: ct, VoteGranted: false}
+		log.Printf("[%d] RequestVote: LOG_BEHIND candidate=%d term=%d", r.serverId, requestVote.CandidateId, requestVote.Term)
+		return &RequestVoteRes{Term: r.state.currentTerm, VoteGranted: false}
 	}
 
-	log.Printf("[%d] processRequestVote GRANTING_VOTE electionTerm=%d candidate=%d", r.serverId, requestVote.Term, requestVote.CandidateId)
+	// Grant vote
+	log.Printf("[%d] RequestVote: GRANTED candidate=%d term=%d", r.serverId, requestVote.CandidateId, requestVote.Term)
 	r.state.votedFor = requestVote.CandidateId
-	return &RequestVoteRes{Term: ct, VoteGranted: true}
+	return &RequestVoteRes{Term: r.state.currentTerm, VoteGranted: true}
 }
 
 // maybeStartElection checks whether we are in the right state
