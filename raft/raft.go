@@ -596,71 +596,78 @@ func (r *RaftServer) processClientCommand(
 		return nil
 	}
 
-	// Add entry to our log while holding the lock.
-	// Then try to apply to all followers.
-	r.state.Lock()
-
-	if r.state.role != RaftRoleLeader {
-		r.state.Unlock()
+	commandIndex, err := r.appendCommandIfLeader(command.Command)
+	if err != nil {
 		return &ClientCommandRes{
 			Success: false,
-			Err:     errors.New("Client commands only accepted by leader"),
+			Err:     err,
 		}
 	}
 
-	newEntries := []*LogEntry{{
+	// Start peers catching up --- this will kick off async,
+	// so we need to then wait for lastApplied to catch up
+	// with the LogIndex for the command being added.
+	r.startPeerCatchUp()
+	r.waitForLastAppliedToCatchUp(commandIndex)
+
+	return &ClientCommandRes{
+		Success: true,
+		Err:     nil,
+	}
+}
+
+// appendCommandIfLeader appends the command to the log if we are the leader,
+// otherwise returns an error.
+// State lock should _not_ be held when calling this method.
+func (r *RaftServer) appendCommandIfLeader(command []byte) (LogIndex, error) {
+	r.state.Lock()
+	defer r.state.Unlock()
+	defer r.persistState()
+
+	if r.state.role != RaftRoleLeader {
+		return 0, errors.New("client commands only accepted by leader")
+	}
+	r.state.log.Append([]*LogEntry{{
 		Term:    r.state.currentTerm,
-		Command: command.Command,
-	}}
-	r.state.log.Append(newEntries)
-	waitForLogIndex := r.state.log.LastLogIndex()
+		Command: command,
+	}})
+	commandIndex := r.state.log.LastLogIndex()
+	return commandIndex, nil
+}
 
-	peers := slices.Clone(r.state.peers)
-
-	r.persistState()
-	r.state.Unlock()
-
-	// If we have peers, we need to wait for a majority to
-	// accept before returning.
-	if len(peers) > 0 {
-		for _, peer := range peers {
-			go func() {
-				r.catchUpPeer(peer)
-			}()
-		}
-	} else {
-		// Apply updated commitIndex if it's only one server
-		r.state.Lock()
-		r.state.commitIndex = calculateUpdatedCommitIndex(
-			r.serverId,
-			r.state.currentTerm,
-			r.state.commitIndex,
-			r.state.matchIndex,
-			&r.state.log,
-		)
-		if r.state.commitIndex > r.state.lastApplied {
-			r.catchUpStateMachine()
-		}
-		r.state.Unlock()
-	}
-
-	// Only respond after lastApplied >= log index *for this
-	// client command*. We should use something like a sync.Cond
+// waitForLastAppliedToCatchUp returns when r.state.lastApplied is at
+// least as large as wanted.
+// State lock should _not_ be held when calling this method.
+func (r *RaftServer) waitForLastAppliedToCatchUp(wanted LogIndex) {
+	// We should use something like a sync.Cond
 	// rather than a for + sleep, but for now okay.
 	r.state.Lock()
 	la := r.state.lastApplied
 	r.state.Unlock()
-	for !(la >= waitForLogIndex) {
+	for la < wanted {
 		time.Sleep(1 * time.Millisecond)
 
 		r.state.Lock()
 		la = r.state.lastApplied
 		r.state.Unlock()
 	}
+}
 
-	return &ClientCommandRes{
-		Success: true,
-		Err:     nil,
+// startPeerCatchUp kicks of async catch up for each peer.
+// Also handles case where there are no peers.
+// State lock should _not_ be held when calling this method.
+func (r *RaftServer) startPeerCatchUp() {
+	r.state.Lock()
+	defer r.state.Unlock()
+
+	// If we have peers, catch up each in parallel. Otherwise, if we
+	// are the only server, catch up ourselves and return.
+	if len(r.state.peers) > 0 {
+		for _, peer := range r.state.peers {
+			go r.catchUpPeer(peer)
+		}
+	} else {
+		r.maybeAdvanceCommitIndex()
 	}
 }
 
@@ -707,17 +714,25 @@ func (r *RaftServer) catchUpPeer(
 		r.state.Lock()
 		r.state.nextIndex[peer] = nextReq.newNextIndex
 		r.state.matchIndex[peer] = nextReq.newMatchIndex
-		r.state.commitIndex = calculateUpdatedCommitIndex(
-			r.serverId,
-			r.state.currentTerm,
-			r.state.commitIndex,
-			r.state.matchIndex,
-			&r.state.log,
-		)
-		if r.state.commitIndex > r.state.lastApplied {
-			r.catchUpStateMachine()
-		}
+		r.maybeAdvanceCommitIndex()
 		r.state.Unlock()
+	}
+}
+
+// maybeAdvanceCommitIndex recalculates the commit index based on
+// peer match indexes, and applies any newly committed entries to
+// the state machine.
+// Caller must hold state lock.
+func (r *RaftServer) maybeAdvanceCommitIndex() {
+	r.state.commitIndex = calculateUpdatedCommitIndex(
+		r.serverId,
+		r.state.currentTerm,
+		r.state.commitIndex,
+		r.state.matchIndex,
+		&r.state.log,
+	)
+	if r.state.commitIndex > r.state.lastApplied {
+		r.catchUpStateMachine()
 	}
 }
 
