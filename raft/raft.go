@@ -45,7 +45,7 @@ type rpcOutgoingTransport interface {
 // StateMachine
 type StateMachine interface {
 	// apply applies command to this state machine
-	apply(command []byte)
+	apply(command []byte) error
 }
 
 // noVote is a sentinel server ID for state.votedFor, representing
@@ -416,7 +416,7 @@ func (r *RaftServer) persistState() {
 	}
 	err := ps.Save(r.stateDir)
 	if err != nil {
-		log.Printf("Error saving state; panic: %v", err)
+		panic(fmt.Sprintf("failed to persist raft state: %v", err))
 	}
 }
 
@@ -571,14 +571,23 @@ func (r *RaftServer) processAppendEntriesRequest(appendEntries AppendEntriesReq)
 }
 
 // catchUpStateMachine applies log entries from lastApplied
-// to commitIndex, advancing lastApplied to match commitIndex when
-// complete.
+// to commitIndex, advancing lastApplied after each successful apply.
 func (r *RaftServer) catchUpStateMachine() {
-	entries := r.state.log.Slice(r.state.lastApplied+1, r.state.commitIndex+1)
-	for _, e := range entries {
-		r.stateMachine.apply(e.Command)
+	// Check this invariant first, makes following loop simpler
+	if r.state.commitIndex > LogIndex(r.state.log.Len()) {
+		panic(fmt.Sprintf(
+			"invariant violation, commitIndex=%d > len(log)=%d",
+			r.state.commitIndex, r.state.log.Len(),
+		))
 	}
-	r.state.lastApplied = r.state.commitIndex
+
+	for r.state.lastApplied < r.state.commitIndex {
+		entry, _ := r.state.log.Get(r.state.lastApplied + 1)
+		if err := r.stateMachine.apply(entry.Command); err != nil {
+			panic(fmt.Sprintf("failed to apply log entry %d: %v", r.state.lastApplied+1, err))
+		}
+		r.state.lastApplied++
+	}
 }
 
 // processClientCommand adds command to log, and blocks until a

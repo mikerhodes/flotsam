@@ -21,8 +21,9 @@ type CountingStateMachine struct {
 }
 
 // apply implements StateMachine
-func (sm *CountingStateMachine) apply(_ []byte) {
+func (sm *CountingStateMachine) apply(_ []byte) error {
 	sm.count.Add(1)
+	return nil
 }
 
 // countingAETransport counts the number of AppendEntries requests

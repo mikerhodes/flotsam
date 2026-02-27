@@ -22,7 +22,7 @@ type NoopStateMachine struct {
 }
 
 // apply implements StateMachine
-func (sm *NoopStateMachine) apply(_ []byte) {}
+func (sm *NoopStateMachine) apply(_ []byte) error { return nil }
 
 func TestRaftServerStartsFollower(t *testing.T) {
 	raftSrv, err := NewRaftServer(1, []ServerId{}, t.TempDir(), &NoopStateMachine{})
