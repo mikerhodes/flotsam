@@ -16,41 +16,20 @@ import (
 	"time"
 )
 
+const (
+	// noVote is a sentinel server ID for state.votedFor, representing
+	// no candidate has been voted on this term.
+	noVote = -1
+
+	// Election deadlines set to now + (electionTimeoutBase + rand(electionPerturbation))
+	electionTimeoutBase  = 150 * time.Millisecond
+	electionPerturbation = 150 * time.Millisecond
+	heartbeatDuration    = electionPerturbation / 2
+)
+
 type Term int64
 type ServerId int64
 type LogIndex int64
-
-// rpcOutgoingTransport is the interface implemented by the
-// external transport. At a peer, these messages are
-// processed by an rpcResponder.
-type rpcOutgoingTransport interface {
-
-	// makeRequestVoteRequest makes a request to peer asking for its vote
-	// in a leader election, returning the peer's vote.
-	makeRequestVoteRequest(
-		ctx context.Context,
-		peer ServerId,
-		requestVote RequestVoteReq,
-	) (*RequestVoteRes, error)
-
-	// makeHeartbeatRequest makes a heartbeat request to a peer, returning
-	// the result.
-	makeHeartbeatRequest(
-		ctx context.Context,
-		peer ServerId,
-		appendEntries AppendEntriesReq,
-	) (*AppendEntriesRes, error)
-}
-
-// StateMachine
-type StateMachine interface {
-	// apply applies command to this state machine
-	apply(command []byte) error
-}
-
-// noVote is a sentinel server ID for state.votedFor, representing
-// no candidate has been voted on this term.
-const noVote = -1
 
 // ElectionResult represents whether this node won an election.
 // True if it did, false if it didn't.
@@ -77,11 +56,9 @@ func (r RaftRole) String() string {
 	}
 }
 
-// Election deadlines set to now + (electionTimeoutBase + rand(electionPerturbation))
-const electionTimeoutBase = 150 * time.Millisecond
-const electionPerturbation = 150 * time.Millisecond
-const heartbeatDuration = electionPerturbation / 2
-
+// ================================================
+// Types for external requests made to RaftServer
+// ================================================
 type AppendEntriesReq struct {
 	Term         Term
 	LeaderId     ServerId
@@ -94,7 +71,6 @@ type AppendEntriesRes struct {
 	Term    Term
 	Success bool
 }
-
 type RequestVoteReq struct {
 	Term         Term
 	CandidateId  ServerId
@@ -105,9 +81,6 @@ type RequestVoteRes struct {
 	Term        Term
 	VoteGranted bool
 }
-
-// ClientCommandReq and ClientCommandRes are used to receive
-// and respond to client commands.
 type ClientCommandReq struct {
 	Command []byte
 }
@@ -116,6 +89,39 @@ type ClientCommandRes struct {
 	Err     error
 }
 
+// ================================================
+// Interfaces used by RaftServer
+// ================================================
+
+// rpcOutgoingTransport is the interface implemented by the
+// external transport. At a peer, these messages are
+// processed by an rpcResponder.
+type rpcOutgoingTransport interface {
+	// makeRequestVoteRequest makes a request to peer asking for its vote
+	// in a leader election, returning the peer's vote.
+	makeRequestVoteRequest(
+		ctx context.Context,
+		peer ServerId,
+		requestVote RequestVoteReq,
+	) (*RequestVoteRes, error)
+
+	// makeHeartbeatRequest makes a heartbeat request to a peer, returning
+	// the result.
+	makeHeartbeatRequest(
+		ctx context.Context,
+		peer ServerId,
+		appendEntries AppendEntriesReq,
+	) (*AppendEntriesRes, error)
+}
+
+// StateMachine is the external state machine that processes
+// the commands contained in the raft log.
+type StateMachine interface {
+	// apply applies command to this state machine
+	apply(command []byte) error
+}
+
+// state contains all Raft state that needs mutex protection
 type state struct {
 	sync.Mutex
 
@@ -176,6 +182,7 @@ func (ps *persistentState) Save(stateDir string) error {
 	return nil
 }
 
+// RaftServer runs the raft protocol between peers.
 type RaftServer struct {
 	state *state
 
@@ -232,11 +239,14 @@ func NewRaftServer(serverId ServerId, peers []ServerId, stateDir string, stateMa
 	}, nil
 }
 
+// nextHeartbeat returns the time for the next heartbeat (if we are leader).
 func nextHeartbeat() time.Time {
 	nextHeartbeat := time.Now().Add(50 * time.Millisecond)
 	return nextHeartbeat
 }
 
+// newElectionDeadline returns a randomised deadline for running the
+// next election.
 func newElectionDeadline() time.Time {
 	perturbMs, _ := rand.Int(rand.Reader, big.NewInt(electionPerturbation.Milliseconds()))
 	deadline := time.Now().Add(electionTimeoutBase)
