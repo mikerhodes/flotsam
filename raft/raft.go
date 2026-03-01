@@ -27,14 +27,20 @@ const (
 	heartbeatDuration    = electionPerturbation / 2
 )
 
+// Term is the term in the Raft protocol
 type Term int64
+
+// ServerId is a Raft server ID
 type ServerId int64
-type LogIndex int64
 
-// ElectionResult represents whether this node won an election.
+// logIndex represents an index into the Raft log (1-based)
+type logIndex int64
+
+// electionResult represents whether this node won an election.
 // True if it did, false if it didn't.
-type ElectionResult bool
+type electionResult bool
 
+// RaftRole is a role in the Raft protocol
 type RaftRole int
 
 const (
@@ -43,6 +49,7 @@ const (
 	RaftRoleLeader    RaftRole = 3
 )
 
+// String implements Stringer
 func (r RaftRole) String() string {
 	switch r {
 	case RaftRoleFollower:
@@ -59,28 +66,29 @@ func (r RaftRole) String() string {
 // ================================================
 // Types for external requests made to RaftServer
 // ================================================
-type AppendEntriesReq struct {
+type appendEntriesReq struct {
 	Term         Term
 	LeaderId     ServerId
-	PrevLogIndex LogIndex
+	PrevLogIndex logIndex
 	PrevLogTerm  Term
-	Entries      []*LogEntry
-	LeaderCommit LogIndex
+	Entries      []*logEntry
+	LeaderCommit logIndex
 }
-type AppendEntriesRes struct {
+type appendEntriesRes struct {
 	Term    Term
 	Success bool
 }
-type RequestVoteReq struct {
+type requestVoteReq struct {
 	Term         Term
 	CandidateId  ServerId
-	LastLogIndex LogIndex
+	LastLogIndex logIndex
 	LastLogTerm  Term
 }
-type RequestVoteRes struct {
+type requestVoteRes struct {
 	Term        Term
 	VoteGranted bool
 }
+
 type ClientCommandReq struct {
 	Command []byte
 }
@@ -93,25 +101,25 @@ type ClientCommandRes struct {
 // Interfaces used by RaftServer
 // ================================================
 
-// rpcOutgoingTransport is the interface implemented by the
+// rpcTransport is the interface implemented by the
 // external transport. At a peer, these messages are
 // processed by an rpcResponder.
-type rpcOutgoingTransport interface {
+type rpcTransport interface {
 	// makeRequestVoteRequest makes a request to peer asking for its vote
 	// in a leader election, returning the peer's vote.
 	makeRequestVoteRequest(
 		ctx context.Context,
 		peer ServerId,
-		requestVote RequestVoteReq,
-	) (*RequestVoteRes, error)
+		requestVote requestVoteReq,
+	) (*requestVoteRes, error)
 
 	// makeHeartbeatRequest makes a heartbeat request to a peer, returning
 	// the result.
 	makeHeartbeatRequest(
 		ctx context.Context,
 		peer ServerId,
-		appendEntries AppendEntriesReq,
-	) (*AppendEntriesRes, error)
+		appendEntries appendEntriesReq,
+	) (*appendEntriesRes, error)
 }
 
 // StateMachine is the external state machine that processes
@@ -131,15 +139,15 @@ type state struct {
 	// Persistent state
 	currentTerm Term
 	votedFor    ServerId
-	log         RaftLog
+	log         raftLog
 
 	// Volatile state
-	commitIndex LogIndex
-	lastApplied LogIndex
+	commitIndex logIndex
+	lastApplied logIndex
 
 	// Leader volatile state
-	nextIndex  map[ServerId]LogIndex
-	matchIndex map[ServerId]LogIndex
+	nextIndex  map[ServerId]logIndex
+	matchIndex map[ServerId]logIndex
 
 	electionDeadline time.Time
 	nextHeartbeat    time.Time
@@ -151,10 +159,10 @@ type state struct {
 type persistentState struct {
 	CurrentTerm Term
 	VotedFor    ServerId
-	Log         []*LogEntry
+	Log         []*logEntry
 }
 
-func LoadPersistentState(stateDir string) (persistentState, error) {
+func loadPersistentState(stateDir string) (persistentState, error) {
 	ps := persistentState{}
 	data, err := os.ReadFile(filepath.Join(stateDir, "raft.json"))
 	if err != nil {
@@ -167,7 +175,7 @@ func LoadPersistentState(stateDir string) (persistentState, error) {
 	return ps, nil
 }
 
-func (ps *persistentState) Save(stateDir string) error {
+func (ps *persistentState) save(stateDir string) error {
 	data, err := json.Marshal(ps)
 	if err != nil {
 		return fmt.Errorf("saving state: %w", err)
@@ -196,7 +204,7 @@ type RaftServer struct {
 	stateMachine StateMachine
 
 	// transport must be assigned before calling Start
-	transport rpcOutgoingTransport
+	transport rpcTransport
 
 	// inShutdown is true when server is shutting down,
 	// and prevents new calls from starting.
@@ -222,11 +230,11 @@ func NewRaftServer(serverId ServerId, peers []ServerId, stateDir string, stateMa
 			role:             RaftRoleFollower,
 			currentTerm:      0,
 			votedFor:         noVote,
-			log:              RaftLog{[]*LogEntry{}},
+			log:              raftLog{[]*logEntry{}},
 			commitIndex:      0,
 			lastApplied:      0,
-			nextIndex:        map[ServerId]LogIndex{},
-			matchIndex:       map[ServerId]LogIndex{},
+			nextIndex:        map[ServerId]logIndex{},
+			matchIndex:       map[ServerId]logIndex{},
 			peers:            peers,
 			electionDeadline: electionDeadline,
 			nextHeartbeat:    nextHeartbeat,
@@ -261,11 +269,11 @@ func (r *RaftServer) Start() {
 	}
 
 	// Load persistent state
-	if ps, err := LoadPersistentState(r.stateDir); err == nil {
+	if ps, err := loadPersistentState(r.stateDir); err == nil {
 		r.state.Lock()
 		r.state.currentTerm = ps.CurrentTerm
 		r.state.votedFor = ps.VotedFor
-		r.state.log.Replace(ps.Log)
+		r.state.log.replace(ps.Log)
 		r.state.Unlock()
 	}
 
@@ -317,9 +325,9 @@ func (r *RaftServer) persistState() {
 	ps := persistentState{
 		CurrentTerm: r.state.currentTerm,
 		VotedFor:    r.state.votedFor,
-		Log:         r.state.log.Entries(),
+		Log:         r.state.log.entries(),
 	}
-	err := ps.Save(r.stateDir)
+	err := ps.save(r.stateDir)
 	if err != nil {
 		panic(fmt.Sprintf("failed to persist raft state: %v", err))
 	}
@@ -353,17 +361,17 @@ func (r *RaftServer) becomeFollower(term Term) {
 // Caller must hold state lock.
 func (r *RaftServer) becomeLeader() {
 	r.state.role = RaftRoleLeader
-	r.state.nextIndex = map[ServerId]LogIndex{}
-	r.state.matchIndex = map[ServerId]LogIndex{}
+	r.state.nextIndex = map[ServerId]logIndex{}
+	r.state.matchIndex = map[ServerId]logIndex{}
 	for _, peer := range r.state.peers {
-		r.state.nextIndex[peer] = LogIndex(r.state.log.Len() + 1)
+		r.state.nextIndex[peer] = logIndex(r.state.log.len() + 1)
 		r.state.matchIndex[peer] = 0
 	}
 	r.state.nextHeartbeat = nextHeartbeat()
 	log.Printf("[%d] became leader, term=%d", r.serverId, r.state.currentTerm)
 }
 
-func (r *RaftServer) processAppendEntriesRequest(appendEntries AppendEntriesReq) *AppendEntriesRes {
+func (r *RaftServer) processAppendEntriesRequest(appendEntries appendEntriesReq) *appendEntriesRes {
 	if r.inShutdown.Load() {
 		return nil
 	}
@@ -374,7 +382,7 @@ func (r *RaftServer) processAppendEntriesRequest(appendEntries AppendEntriesReq)
 
 	// Out of date request
 	if appendEntries.Term < r.state.currentTerm {
-		return &AppendEntriesRes{Term: r.state.currentTerm, Success: false}
+		return &appendEntriesRes{Term: r.state.currentTerm, Success: false}
 	}
 
 	// Request is for current term, bump election deadline.
@@ -391,7 +399,7 @@ func (r *RaftServer) processAppendEntriesRequest(appendEntries AppendEntriesReq)
 	// If there are entries, entry at prevLogIndex must match term
 	// prevLogTerm (5.3)
 	if !r.state.log.prevLogMatches(appendEntries.PrevLogIndex, appendEntries.PrevLogTerm) {
-		return &AppendEntriesRes{Term: r.state.currentTerm, Success: false}
+		return &appendEntriesRes{Term: r.state.currentTerm, Success: false}
 	}
 
 	// Truncate if we find a mismatched entry (5.3)
@@ -416,7 +424,7 @@ func (r *RaftServer) processAppendEntriesRequest(appendEntries AppendEntriesReq)
 		appendEntries.Entries,
 	); hasConflict {
 		log.Printf("Truncating from %d", idx)
-		r.state.log.TruncateFrom(idx)
+		r.state.log.truncateFrom(idx)
 	}
 
 	// Append any new entries not already in the log. First,
@@ -434,33 +442,33 @@ func (r *RaftServer) processAppendEntriesRequest(appendEntries AppendEntriesReq)
 	//    7          7                     // discard new
 	//               8                     // append
 	//               9                     // append
-	alreadyHave := r.state.log.Len() - int(appendEntries.PrevLogIndex)
+	alreadyHave := r.state.log.len() - int(appendEntries.PrevLogIndex)
 	newEntries := appendEntries.Entries[alreadyHave:]
-	r.state.log.Append(newEntries)
+	r.state.log.append(newEntries)
 
 	if appendEntries.LeaderCommit > r.state.commitIndex {
 		r.state.commitIndex = min(
-			appendEntries.LeaderCommit, r.state.log.LastLogIndex(),
+			appendEntries.LeaderCommit, r.state.log.lastLogIndex(),
 		)
 		r.catchUpStateMachine()
 	}
 
-	return &AppendEntriesRes{Term: r.state.currentTerm, Success: true}
+	return &appendEntriesRes{Term: r.state.currentTerm, Success: true}
 }
 
 // catchUpStateMachine applies log entries from lastApplied
 // to commitIndex, advancing lastApplied after each successful apply.
 func (r *RaftServer) catchUpStateMachine() {
 	// Check this invariant first, makes following loop simpler
-	if r.state.commitIndex > LogIndex(r.state.log.Len()) {
+	if r.state.commitIndex > logIndex(r.state.log.len()) {
 		panic(fmt.Sprintf(
 			"invariant violation, commitIndex=%d > len(log)=%d",
-			r.state.commitIndex, r.state.log.Len(),
+			r.state.commitIndex, r.state.log.len(),
 		))
 	}
 
 	for r.state.lastApplied < r.state.commitIndex {
-		entry, _ := r.state.log.Get(r.state.lastApplied + 1)
+		entry, _ := r.state.log.get(r.state.lastApplied + 1)
 		if err := r.stateMachine.apply(entry.Command); err != nil {
 			panic(fmt.Sprintf("failed to apply log entry %d: %v", r.state.lastApplied+1, err))
 		}
@@ -500,7 +508,7 @@ func (r *RaftServer) processClientCommand(
 // appendCommandIfLeader appends the command to the log if we are the leader,
 // otherwise returns an error.
 // State lock should _not_ be held when calling this method.
-func (r *RaftServer) appendCommandIfLeader(command []byte) (LogIndex, error) {
+func (r *RaftServer) appendCommandIfLeader(command []byte) (logIndex, error) {
 	r.state.Lock()
 	defer r.state.Unlock()
 	defer r.persistState()
@@ -508,18 +516,18 @@ func (r *RaftServer) appendCommandIfLeader(command []byte) (LogIndex, error) {
 	if r.state.role != RaftRoleLeader {
 		return 0, errors.New("client commands only accepted by leader")
 	}
-	r.state.log.Append([]*LogEntry{{
+	r.state.log.append([]*logEntry{{
 		Term:    r.state.currentTerm,
 		Command: command,
 	}})
-	commandIndex := r.state.log.LastLogIndex()
+	commandIndex := r.state.log.lastLogIndex()
 	return commandIndex, nil
 }
 
 // waitForLastAppliedToCatchUp returns when r.state.lastApplied is at
 // least as large as wanted.
 // Do not call while holding state lock.
-func (r *RaftServer) waitForLastAppliedToCatchUp(wanted LogIndex) {
+func (r *RaftServer) waitForLastAppliedToCatchUp(wanted logIndex) {
 	// We should use something like a sync.Cond
 	// rather than a for + sleep, but for now okay.
 	r.state.Lock()
@@ -566,7 +574,7 @@ func (r *RaftServer) catchUpPeer(
 			r.state.Unlock()
 			return
 		}
-		if r.state.log.LastLogIndex() < r.state.nextIndex[peer] {
+		if r.state.log.lastLogIndex() < r.state.nextIndex[peer] {
 			// Caught up this peer
 			r.state.Unlock()
 			return
@@ -623,10 +631,10 @@ func (r *RaftServer) maybeAdvanceCommitIndex() {
 func calculateUpdatedCommitIndex(
 	serverId ServerId,
 	currentTerm Term,
-	currentCommitIndex LogIndex,
-	matchIndex map[ServerId]LogIndex,
-	raftLog *RaftLog,
-) LogIndex {
+	currentCommitIndex logIndex,
+	matchIndex map[ServerId]logIndex,
+	raftLog *raftLog,
+) logIndex {
 	// from the paper: If there exists an N such that N > commitIndex, a
 	// majority of matchIndex[i] ≥ N, and log[N].term == currentTerm:
 	// set commitIndex = N (§5.3, §5.4).
@@ -637,7 +645,7 @@ func calculateUpdatedCommitIndex(
 	// so we have all servers' known durable log indexes.
 	// Find the highest N in that array such that a majority is
 	// above it, that N is the commitIndex.
-	commitIndexes := []LogIndex{raftLog.LastLogIndex()}
+	commitIndexes := []logIndex{raftLog.lastLogIndex()}
 	for _, idx := range matchIndex {
 		commitIndexes = append(commitIndexes, idx)
 	}
@@ -652,7 +660,7 @@ func calculateUpdatedCommitIndex(
 		return currentCommitIndex
 	}
 	// Check the term on that log[N]
-	entry, found := raftLog.Get(n)
+	entry, found := raftLog.get(n)
 	if !found {
 		log.Printf(
 			"[%d] maybeAdvanceCommitIndex - should be impossible for N>len(log)",
@@ -668,9 +676,9 @@ func calculateUpdatedCommitIndex(
 
 // nextAEReqForPeer is a container for the result of RaftServer.nextAEReqForPeer
 type nextAEReqForPeer struct {
-	req           AppendEntriesReq
-	newNextIndex  LogIndex
-	newMatchIndex LogIndex
+	req           appendEntriesReq
+	newNextIndex  logIndex
+	newMatchIndex logIndex
 }
 
 // nextAEReqForPeer generates an AppendEntries request for the peer
@@ -684,20 +692,20 @@ func (r *RaftServer) nextAEReqForPeer(peer ServerId) nextAEReqForPeer {
 	peerNextIndex := r.state.nextIndex[peer]
 	prevLogIndex := max(0, peerNextIndex-1)
 	prevLogTerm := Term(0)
-	if entry, found := r.state.log.Get(prevLogIndex); found {
+	if entry, found := r.state.log.get(prevLogIndex); found {
 		prevLogTerm = entry.Term
 	}
-	appendEntriesReq := AppendEntriesReq{
+	appendEntriesReq := appendEntriesReq{
 		Term:         r.state.currentTerm,
 		LeaderId:     r.serverId,
 		PrevLogIndex: prevLogIndex,
 		PrevLogTerm:  prevLogTerm,
-		Entries:      r.state.log.SliceFrom(peerNextIndex),
+		Entries:      r.state.log.sliceFrom(peerNextIndex),
 		LeaderCommit: r.state.commitIndex,
 	}
 
 	// If successful, next index for peer should be just beyond current log
-	newMatchIndex := prevLogIndex + LogIndex(len(appendEntriesReq.Entries))
+	newMatchIndex := prevLogIndex + logIndex(len(appendEntriesReq.Entries))
 	return nextAEReqForPeer{
 		req:           appendEntriesReq,
 		newNextIndex:  newMatchIndex + 1,
@@ -705,7 +713,7 @@ func (r *RaftServer) nextAEReqForPeer(peer ServerId) nextAEReqForPeer {
 	}
 }
 
-func (r *RaftServer) processRequestVote(requestVote RequestVoteReq) *RequestVoteRes {
+func (r *RaftServer) processRequestVote(requestVote requestVoteReq) *requestVoteRes {
 	if r.inShutdown.Load() {
 		return nil
 	}
@@ -723,31 +731,31 @@ func (r *RaftServer) processRequestVote(requestVote RequestVoteReq) *RequestVote
 	// Reject stale requests (5.1)
 	if requestVote.Term < r.state.currentTerm {
 		log.Printf("[%d] RequestVote: STALE_TERM candidate=%d term=%d", r.serverId, requestVote.CandidateId, requestVote.Term)
-		return &RequestVoteRes{Term: r.state.currentTerm, VoteGranted: false}
+		return &requestVoteRes{Term: r.state.currentTerm, VoteGranted: false}
 	}
 
 	// We already won the election for this term, don't grant another candidate a vote (5.2)
 	if r.state.role == RaftRoleLeader && requestVote.Term == r.state.currentTerm {
 		log.Printf("[%d] RequestVote: I_AM_LEADER candidate=%d term=%d", r.serverId, requestVote.CandidateId, requestVote.Term)
-		return &RequestVoteRes{Term: r.state.currentTerm, VoteGranted: false}
+		return &requestVoteRes{Term: r.state.currentTerm, VoteGranted: false}
 	}
 
 	// Only grant one vote per term (section 5.2)
 	if r.state.votedFor != noVote && r.state.votedFor != requestVote.CandidateId {
 		log.Printf("[%d] RequestVote: ALREADY_VOTED candidate=%d term=%d", r.serverId, requestVote.CandidateId, requestVote.Term)
-		return &RequestVoteRes{Term: r.state.currentTerm, VoteGranted: false}
+		return &requestVoteRes{Term: r.state.currentTerm, VoteGranted: false}
 	}
 
 	// Election restriction: candidate's log must be at least as up-to-date (section 5.4.1)
-	if r.state.log.AheadOf(requestVote.LastLogTerm, requestVote.LastLogIndex) {
+	if r.state.log.aheadOf(requestVote.LastLogTerm, requestVote.LastLogIndex) {
 		log.Printf("[%d] RequestVote: LOG_BEHIND candidate=%d term=%d", r.serverId, requestVote.CandidateId, requestVote.Term)
-		return &RequestVoteRes{Term: r.state.currentTerm, VoteGranted: false}
+		return &requestVoteRes{Term: r.state.currentTerm, VoteGranted: false}
 	}
 
 	// Grant vote
 	log.Printf("[%d] RequestVote: GRANTED candidate=%d term=%d", r.serverId, requestVote.CandidateId, requestVote.Term)
 	r.state.votedFor = requestVote.CandidateId
-	return &RequestVoteRes{Term: r.state.currentTerm, VoteGranted: true}
+	return &requestVoteRes{Term: r.state.currentTerm, VoteGranted: true}
 }
 
 // maybeStartElection checks whether we are in the right state
@@ -777,7 +785,7 @@ func (r *RaftServer) maybeStartElection() {
 	peers := slices.Clone(r.state.peers)
 	electionTerm := r.state.currentTerm
 	lastLogTerm := Term(0)
-	entry, found := r.state.log.Get(r.state.log.LastLogIndex())
+	entry, found := r.state.log.get(r.state.log.lastLogIndex())
 	if found {
 		lastLogTerm = entry.Term
 	}
@@ -797,10 +805,10 @@ func (r *RaftServer) maybeStartElection() {
 func (r *RaftServer) runElection(ctx context.Context, electionTerm Term, lastLogTerm Term, peers []ServerId) {
 	log.Printf("[%d] runElection term=%d", r.serverId, electionTerm)
 
-	voteReq := RequestVoteReq{
+	voteReq := requestVoteReq{
 		Term:         electionTerm,
 		CandidateId:  r.serverId,
-		LastLogIndex: r.state.log.LastLogIndex(),
+		LastLogIndex: r.state.log.lastLogIndex(),
 		LastLogTerm:  lastLogTerm,
 	}
 	won := r.collectVotes(ctx, electionTerm, peers, voteReq)
@@ -835,7 +843,7 @@ func (r *RaftServer) runElection(ctx context.Context, electionTerm Term, lastLog
 
 // collectVotes sends peers vote requests, and returns true if this
 // node received a majority of votes.
-func (r *RaftServer) collectVotes(ctx context.Context, electionTerm Term, peers []ServerId, reqVoteReq RequestVoteReq) ElectionResult {
+func (r *RaftServer) collectVotes(ctx context.Context, electionTerm Term, peers []ServerId, reqVoteReq requestVoteReq) electionResult {
 	votes := make(chan bool, len(peers))
 	votesForMe := 1 // vote for self
 	votesRequired := len(peers)/2 + 1
@@ -917,12 +925,12 @@ func (r *RaftServer) maybeSendHeartbeats() {
 // until complete.
 func (r *RaftServer) sendLeaderHeartbeats() {
 	r.state.Lock()
-	appendEntriesReq := AppendEntriesReq{
+	appendEntriesReq := appendEntriesReq{
 		Term:         r.state.currentTerm,
 		LeaderId:     r.serverId,
 		PrevLogIndex: 0,
 		PrevLogTerm:  0,
-		Entries:      []*LogEntry{},
+		Entries:      []*logEntry{},
 		LeaderCommit: 0,
 	}
 	r.state.Unlock()

@@ -26,7 +26,7 @@ func TestRVFollowerGrantsVote(t *testing.T) {
 	}
 	raftSrv.state.currentTerm = 1
 
-	res := raftSrv.processRequestVote(RequestVoteReq{
+	res := raftSrv.processRequestVote(requestVoteReq{
 		Term:         2,
 		CandidateId:  2,
 		LastLogIndex: 0,
@@ -52,7 +52,7 @@ func TestRVLeaderGrantsVoteBecomesFollower(t *testing.T) {
 	raftSrv.state.currentTerm = 1
 	raftSrv.state.role = RaftRoleLeader
 
-	res := raftSrv.processRequestVote(RequestVoteReq{
+	res := raftSrv.processRequestVote(requestVoteReq{
 		Term:         2,
 		CandidateId:  2,
 		LastLogIndex: 0,
@@ -80,7 +80,7 @@ func TestRVFollowerGrantsOnlyOneVote(t *testing.T) {
 	}
 	raftSrv.state.currentTerm = 1
 
-	res := raftSrv.processRequestVote(RequestVoteReq{
+	res := raftSrv.processRequestVote(requestVoteReq{
 		Term:         2,
 		CandidateId:  2,
 		LastLogIndex: 0,
@@ -89,7 +89,7 @@ func TestRVFollowerGrantsOnlyOneVote(t *testing.T) {
 	if res.VoteGranted != true {
 		t.Errorf("res.VoteGranted= %t, want true", res.VoteGranted)
 	}
-	res = raftSrv.processRequestVote(RequestVoteReq{
+	res = raftSrv.processRequestVote(requestVoteReq{
 		Term:         2,
 		CandidateId:  3,
 		LastLogIndex: 0,
@@ -107,7 +107,7 @@ func TestRVFollowerRejectsVoteOldTerm(t *testing.T) {
 	}
 	raftSrv.state.currentTerm = 3
 
-	res := raftSrv.processRequestVote(RequestVoteReq{
+	res := raftSrv.processRequestVote(requestVoteReq{
 		Term:         2,
 		CandidateId:  2,
 		LastLogIndex: 0,
@@ -131,21 +131,21 @@ func TestRVFollowerRejectsVoteOldTerm(t *testing.T) {
 func TestRaftLogAheadOf(t *testing.T) {
 	tests := []struct {
 		name      string
-		log       []*LogEntry
+		log       []*logEntry
 		otherTerm Term
-		otherIdx  LogIndex
+		otherIdx  logIndex
 		wantAhead bool
 	}{
 		{
 			name:      "empty log is never ahead",
-			log:       []*LogEntry{},
+			log:       []*logEntry{},
 			otherTerm: 0,
 			otherIdx:  0,
 			wantAhead: false,
 		},
 		{
 			name: "ahead when log has higher term",
-			log: []*LogEntry{
+			log: []*logEntry{
 				{Term: 1, Command: []byte{1}},
 				{Term: 2, Command: []byte{2}},
 			},
@@ -155,7 +155,7 @@ func TestRaftLogAheadOf(t *testing.T) {
 		},
 		{
 			name: "ahead when same term but longer",
-			log: []*LogEntry{
+			log: []*logEntry{
 				{Term: 1, Command: []byte{1}},
 				{Term: 1, Command: []byte{2}},
 				{Term: 1, Command: []byte{3}},
@@ -166,7 +166,7 @@ func TestRaftLogAheadOf(t *testing.T) {
 		},
 		{
 			name: "not ahead when same term and length",
-			log: []*LogEntry{
+			log: []*logEntry{
 				{Term: 1, Command: []byte{1}},
 				{Term: 2, Command: []byte{2}},
 			},
@@ -176,7 +176,7 @@ func TestRaftLogAheadOf(t *testing.T) {
 		},
 		{
 			name: "not ahead when other has higher term",
-			log: []*LogEntry{
+			log: []*logEntry{
 				{Term: 1, Command: []byte{1}},
 				{Term: 1, Command: []byte{2}},
 				{Term: 1, Command: []byte{3}},
@@ -187,7 +187,7 @@ func TestRaftLogAheadOf(t *testing.T) {
 		},
 		{
 			name: "not ahead when same term but shorter",
-			log: []*LogEntry{
+			log: []*logEntry{
 				{Term: 1, Command: []byte{1}},
 			},
 			otherTerm: 1,
@@ -198,10 +198,10 @@ func TestRaftLogAheadOf(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			rl := &RaftLog{}
-			rl.Append(tt.log)
+			rl := &raftLog{}
+			rl.append(tt.log)
 
-			got := rl.AheadOf(tt.otherTerm, tt.otherIdx)
+			got := rl.aheadOf(tt.otherTerm, tt.otherIdx)
 			if got != tt.wantAhead {
 				t.Errorf("AheadOf(%d, %d) = %t, want %t", tt.otherTerm, tt.otherIdx, got, tt.wantAhead)
 			}
@@ -217,12 +217,12 @@ func TestRVFollowerRejectsVoteCandidateLogBehind(t *testing.T) {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
 	raftSrv.state.currentTerm = 1
-	raftSrv.state.log.Append([]*LogEntry{
+	raftSrv.state.log.append([]*logEntry{
 		{Term: 1, Command: []byte{1}},
 		{Term: 2, Command: []byte{2}}, // voter's last entry is term 2
 	})
 
-	res := raftSrv.processRequestVote(RequestVoteReq{
+	res := raftSrv.processRequestVote(requestVoteReq{
 		Term:         2,
 		CandidateId:  2,
 		LastLogIndex: 2,
@@ -246,14 +246,14 @@ type mockVoter struct {
 func (r *mockVoter) makeRequestVoteRequest(
 	ctx context.Context,
 	peer ServerId,
-	requestVote RequestVoteReq,
-) (*RequestVoteRes, error) {
+	requestVote requestVoteReq,
+) (*requestVoteRes, error) {
 	r.Lock()
 	defer r.Unlock()
 	vote := r.votes[r.nextVoteIdx]
 	r.nextVoteIdx++
 
-	return &RequestVoteRes{
+	return &requestVoteRes{
 		Term:        requestVote.Term,
 		VoteGranted: vote,
 	}, nil
@@ -263,9 +263,9 @@ func (r *mockVoter) makeRequestVoteRequest(
 func (r *mockVoter) makeHeartbeatRequest(
 	ctx context.Context,
 	peer ServerId,
-	appendEntries AppendEntriesReq,
-) (*AppendEntriesRes, error) {
-	return &AppendEntriesRes{ // standard okay response
+	appendEntries appendEntriesReq,
+) (*appendEntriesRes, error) {
+	return &appendEntriesRes{ // standard okay response
 		Term:    appendEntries.Term,
 		Success: true,
 	}, nil
@@ -283,7 +283,7 @@ func TestBecomeLeaderInitializesNextIndexAndMatchIndex(t *testing.T) {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
 
-	raftSrv.state.log.Append([]*LogEntry{
+	raftSrv.state.log.append([]*logEntry{
 		{Term: 1, Command: []byte{1}},
 		{Term: 1, Command: []byte{2}},
 		{Term: 2, Command: []byte{3}}, // index 3, nextIndex=4
@@ -375,16 +375,16 @@ func TestServerElection(t *testing.T) {
 // mockVoterCapturingReq is an rpcOutgoingTransport that captures the
 // RequestVoteReq for later inspection.
 type mockVoterCapturingReq struct {
-	receivedReq RequestVoteReq
+	receivedReq requestVoteReq
 }
 
 func (r *mockVoterCapturingReq) makeRequestVoteRequest(
 	ctx context.Context,
 	peer ServerId,
-	requestVote RequestVoteReq,
-) (*RequestVoteRes, error) {
+	requestVote requestVoteReq,
+) (*requestVoteRes, error) {
 	r.receivedReq = requestVote
-	return &RequestVoteRes{
+	return &requestVoteRes{
 		Term:        requestVote.Term,
 		VoteGranted: true,
 	}, nil
@@ -393,9 +393,9 @@ func (r *mockVoterCapturingReq) makeRequestVoteRequest(
 func (r *mockVoterCapturingReq) makeHeartbeatRequest(
 	ctx context.Context,
 	peer ServerId,
-	appendEntries AppendEntriesReq,
-) (*AppendEntriesRes, error) {
-	return &AppendEntriesRes{
+	appendEntries appendEntriesReq,
+) (*appendEntriesRes, error) {
+	return &appendEntriesRes{
 		Term:    appendEntries.Term,
 		Success: true,
 	}, nil
@@ -414,7 +414,7 @@ func TestElectionSendsCorrectLogInfo(t *testing.T) {
 		}
 
 		// Give the candidate a log with entries
-		raftSrv.state.log.Append([]*LogEntry{
+		raftSrv.state.log.append([]*logEntry{
 			{Term: 1, Command: []byte{1}},
 			{Term: 2, Command: []byte{2}},
 			{Term: 2, Command: []byte{3}}, // last entry: index=3, term=2
@@ -428,7 +428,7 @@ func TestElectionSendsCorrectLogInfo(t *testing.T) {
 
 		synctest.Wait()
 
-		expectedReq := RequestVoteReq{
+		expectedReq := requestVoteReq{
 			Term:         1,
 			CandidateId:  1,
 			LastLogIndex: 3,

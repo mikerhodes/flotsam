@@ -15,11 +15,11 @@ func TestNextAEReqForPeer_PeerAtOne(t *testing.T) {
 	}
 	raftSrv.state.currentTerm = 2
 	raftSrv.state.commitIndex = 1
-	originalLog := []*LogEntry{
+	originalLog := []*logEntry{
 		{Term: 1, Command: []byte{1}},
 		{Term: 2, Command: []byte{2}},
 	}
-	raftSrv.state.log = RaftLog{originalLog}
+	raftSrv.state.log = raftLog{originalLog}
 	raftSrv.state.nextIndex[2] = 1 // peer needs all entries
 
 	req := raftSrv.nextAEReqForPeer(2)
@@ -70,7 +70,7 @@ func TestNextAEReqForPeer_EmptyLog_PeerAtOne(t *testing.T) {
 	if req.LeaderCommit != 0 {
 		t.Errorf("req.LeaderCommit = %d, want 0", req.LeaderCommit)
 	}
-	if diff := cmp.Diff([]*LogEntry{}, req.Entries); diff != "" {
+	if diff := cmp.Diff([]*logEntry{}, req.Entries); diff != "" {
 		t.Errorf("req.Entries mismatch (-want +got):\n%s", diff)
 	}
 	if nextReq.newMatchIndex != 0 {
@@ -90,7 +90,7 @@ func TestNextAEReqForPeer_WithEntries_PeerUpToDate(t *testing.T) {
 	}
 	raftSrv.state.currentTerm = 3
 	raftSrv.state.commitIndex = 2
-	raftSrv.state.log = RaftLog{[]*LogEntry{
+	raftSrv.state.log = raftLog{[]*logEntry{
 		{Term: 1, Command: []byte{1}},
 		{Term: 2, Command: []byte{2}},
 	}}
@@ -111,7 +111,7 @@ func TestNextAEReqForPeer_WithEntries_PeerUpToDate(t *testing.T) {
 	if req.LeaderCommit != 2 {
 		t.Errorf("req.LeaderCommit = %d, want 2", req.LeaderCommit)
 	}
-	if diff := cmp.Diff([]*LogEntry{}, req.Entries); diff != "" {
+	if diff := cmp.Diff([]*logEntry{}, req.Entries); diff != "" {
 		t.Errorf("req.Entries mismatch (-want +got):\n%s", diff)
 	}
 	if nextReq.newMatchIndex != 2 {
@@ -131,7 +131,7 @@ func TestNextAEReqForPeer_WithEntries_PeerNeedsUpdates(t *testing.T) {
 	}
 	raftSrv.state.currentTerm = 3
 	raftSrv.state.commitIndex = 2
-	raftSrv.state.log = RaftLog{[]*LogEntry{
+	raftSrv.state.log = raftLog{[]*logEntry{
 		{Term: 1, Command: []byte{1}},
 		{Term: 2, Command: []byte{2}}, // index 2
 		{Term: 3, Command: []byte{3}},
@@ -169,11 +169,11 @@ func TestNextAEReqForPeer_PeerAtZero(t *testing.T) {
 	}
 	raftSrv.state.currentTerm = 2
 	raftSrv.state.commitIndex = 1
-	originalLog := []*LogEntry{
+	originalLog := []*logEntry{
 		{Term: 1, Command: []byte{1}},
 		{Term: 2, Command: []byte{2}},
 	}
-	raftSrv.state.log = RaftLog{originalLog}
+	raftSrv.state.log = raftLog{originalLog}
 	raftSrv.state.nextIndex[2] = 0 // invalid state
 
 	nextReq := raftSrv.nextAEReqForPeer(2)

@@ -9,7 +9,7 @@ import (
 
 // mockTransportCapturingAE captures AppendEntries requests for inspection.
 type mockTransportCapturingAE struct {
-	appendEntriesReqs []AppendEntriesReq
+	appendEntriesReqs []appendEntriesReq
 	// failuresRemaining is the number of times makeHeartbeatRequest will
 	// return Success: false before returning Success: true.
 	failuresRemaining int
@@ -18,9 +18,9 @@ type mockTransportCapturingAE struct {
 func (m *mockTransportCapturingAE) makeRequestVoteRequest(
 	ctx context.Context,
 	peer ServerId,
-	requestVote RequestVoteReq,
-) (*RequestVoteRes, error) {
-	return &RequestVoteRes{
+	requestVote requestVoteReq,
+) (*requestVoteRes, error) {
+	return &requestVoteRes{
 		Term:        requestVote.Term,
 		VoteGranted: true,
 	}, nil
@@ -29,11 +29,11 @@ func (m *mockTransportCapturingAE) makeRequestVoteRequest(
 func (m *mockTransportCapturingAE) makeHeartbeatRequest(
 	ctx context.Context,
 	peer ServerId,
-	appendEntries AppendEntriesReq,
-) (*AppendEntriesRes, error) {
+	appendEntries appendEntriesReq,
+) (*appendEntriesRes, error) {
 	m.appendEntriesReqs = append(m.appendEntriesReqs, appendEntries)
 	m.failuresRemaining--
-	return &AppendEntriesRes{
+	return &appendEntriesRes{
 		Term:    appendEntries.Term,
 		Success: m.failuresRemaining < 0,
 	}, nil
@@ -46,7 +46,7 @@ func TestCatchUpPeerDoesNothingWhenNotLeader(t *testing.T) {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
 	raftSrv.state.role = RaftRoleFollower
-	raftSrv.state.log.Append([]*LogEntry{
+	raftSrv.state.log.append([]*logEntry{
 		{Term: 1, Command: []byte{1}},
 	})
 	mockT := &mockTransportCapturingAE{}
@@ -66,7 +66,7 @@ func TestCatchUpPeerDoesNothingWhenPeerUpToDate(t *testing.T) {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
 	raftSrv.state.role = RaftRoleLeader
-	raftSrv.state.log.Append([]*LogEntry{
+	raftSrv.state.log.append([]*logEntry{
 		{Term: 1, Command: []byte{1}},
 		{Term: 1, Command: []byte{2}},
 	})
@@ -89,12 +89,12 @@ func TestCatchUpPeerSendsCorrectAppendEntries(t *testing.T) {
 	}
 	raftSrv.state.currentTerm = 2
 	raftSrv.state.role = RaftRoleLeader
-	leaderLog := []*LogEntry{
+	leaderLog := []*logEntry{
 		{Term: 1, Command: []byte{1}}, // 1
 		{Term: 2, Command: []byte{2}}, // 2
 		{Term: 2, Command: []byte{3}}, // 3
 	}
-	raftSrv.state.log = RaftLog{leaderLog}
+	raftSrv.state.log = raftLog{leaderLog}
 	mockT := &mockTransportCapturingAE{}
 	raftSrv.transport = mockT
 
@@ -108,7 +108,7 @@ func TestCatchUpPeerSendsCorrectAppendEntries(t *testing.T) {
 		t.Fatalf("len(mockT.appendEntriesReqs) = %d, want 1", len(mockT.appendEntriesReqs))
 	}
 
-	expectedReq := AppendEntriesReq{
+	expectedReq := appendEntriesReq{
 		Term:         2,
 		LeaderId:     1,
 		PrevLogIndex: 1,
@@ -129,7 +129,7 @@ func TestCatchUpPeerRetriesOnFailure(t *testing.T) {
 	}
 	raftSrv.state.currentTerm = 2
 	raftSrv.state.role = RaftRoleLeader
-	raftSrv.state.log = RaftLog{[]*LogEntry{
+	raftSrv.state.log = raftLog{[]*logEntry{
 		{Term: 1, Command: []byte{1}},
 		{Term: 2, Command: []byte{2}},
 	}}

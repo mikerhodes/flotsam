@@ -151,10 +151,10 @@ func TestThreeServersWriteDataToAllReplicas(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 	for raft := range harness.Servers() {
 		log := raft.state.log
-		if log.Len() != 100 {
-			t.Errorf("log.Len() == %d, expected 100 for RaftServer %d", log.Len(), raft.serverId)
+		if log.len() != 100 {
+			t.Errorf("log.Len() == %d, expected 100 for RaftServer %d", log.len(), raft.serverId)
 		}
-		for i, b := range raft.state.log.SliceFrom(1) {
+		for i, b := range raft.state.log.sliceFrom(1) {
 			if i != int(b.Command[0]) {
 				t.Errorf("b.Command[0] == %d, expected %d for RaftServer %d at idx %d", b.Command[0], i, raft.serverId, i)
 			}

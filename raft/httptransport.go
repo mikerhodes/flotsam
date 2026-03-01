@@ -13,9 +13,8 @@ import (
 
 // rpcResponder is the interface implemented by the Raft consensus module.
 type rpcResponder interface {
-	processClientCommand(command ClientCommandReq) *ClientCommandRes
-	processRequestVote(requestVote RequestVoteReq) *RequestVoteRes
-	processAppendEntriesRequest(appendEntries AppendEntriesReq) *AppendEntriesRes
+	processRequestVote(requestVote requestVoteReq) *requestVoteRes
+	processAppendEntriesRequest(appendEntries appendEntriesReq) *appendEntriesRes
 }
 
 // HttpTransport is a HTTP server and client transport
@@ -85,7 +84,7 @@ func (t *HttpTransport) appendEntriesRPCHandler(w http.ResponseWriter, req *http
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	appendEntries := AppendEntriesReq{}
+	appendEntries := appendEntriesReq{}
 	err = json.Unmarshal(data, &appendEntries)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -110,7 +109,7 @@ func (t *HttpTransport) requestVoteRPCHandler(w http.ResponseWriter, req *http.R
 		return
 	}
 	// log.Printf("[%d] requestVoteRPC body=%s", r.serverId, data)
-	requestVote := RequestVoteReq{}
+	requestVote := requestVoteReq{}
 	err = json.Unmarshal(data, &requestVote)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -132,8 +131,8 @@ func (t *HttpTransport) requestVoteRPCHandler(w http.ResponseWriter, req *http.R
 func (t *HttpTransport) makeRequestVoteRequest(
 	ctx context.Context,
 	dest ServerId,
-	requestVote RequestVoteReq,
-) (*RequestVoteRes, error) {
+	requestVote requestVoteReq,
+) (*requestVoteRes, error) {
 	addr := t.peerAddrs[dest]
 	reqData, err := json.Marshal(requestVote)
 	if err != nil {
@@ -155,7 +154,7 @@ func (t *HttpTransport) makeRequestVoteRequest(
 	if err != nil {
 		return nil, err
 	}
-	result := &RequestVoteRes{}
+	result := &requestVoteRes{}
 	err = json.Unmarshal(resData, result)
 	if err != nil {
 		return nil, err
@@ -167,8 +166,8 @@ func (t *HttpTransport) makeRequestVoteRequest(
 func (t *HttpTransport) makeHeartbeatRequest(
 	ctx context.Context,
 	dest ServerId,
-	appendEntriesReq AppendEntriesReq,
-) (*AppendEntriesRes, error) {
+	appendEntriesReq appendEntriesReq,
+) (*appendEntriesRes, error) {
 	addr := t.peerAddrs[dest]
 	reqData, err := json.Marshal(appendEntriesReq)
 	if err != nil {
@@ -190,7 +189,7 @@ func (t *HttpTransport) makeHeartbeatRequest(
 	if err != nil {
 		return nil, err
 	}
-	result := &AppendEntriesRes{}
+	result := &appendEntriesRes{}
 	err = json.Unmarshal(resData, result)
 	if err != nil {
 		return nil, err

@@ -44,12 +44,12 @@ func TestAEGreaterTermIncreasesReceiversTerm(t *testing.T) {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
 
-	res := raftSrv.processAppendEntriesRequest(AppendEntriesReq{
+	res := raftSrv.processAppendEntriesRequest(appendEntriesReq{
 		Term:         5,
 		LeaderId:     2,
 		PrevLogIndex: 0,
 		PrevLogTerm:  0,
-		Entries:      []*LogEntry{},
+		Entries:      []*logEntry{},
 		LeaderCommit: 0,
 	})
 
@@ -71,12 +71,12 @@ func TestAELowerTermDoesNotChangeReceiversTerm(t *testing.T) {
 	}
 	raftSrv.state.currentTerm = 10
 
-	res := raftSrv.processAppendEntriesRequest(AppendEntriesReq{
+	res := raftSrv.processAppendEntriesRequest(appendEntriesReq{
 		Term:         5,
 		LeaderId:     2,
 		PrevLogIndex: 0,
 		PrevLogTerm:  0,
-		Entries:      []*LogEntry{},
+		Entries:      []*logEntry{},
 		LeaderCommit: 0,
 	})
 
@@ -95,12 +95,12 @@ func TestAEAdvancesElectionDeadline(t *testing.T) {
 	}
 	raftSrv.state.electionDeadline = time.Now().Add(-1 * time.Second)
 
-	res := raftSrv.processAppendEntriesRequest(AppendEntriesReq{
+	res := raftSrv.processAppendEntriesRequest(appendEntriesReq{
 		Term:         5,
 		LeaderId:     2,
 		PrevLogIndex: 0,
 		PrevLogTerm:  0,
-		Entries:      []*LogEntry{},
+		Entries:      []*logEntry{},
 		LeaderCommit: 0,
 	})
 
@@ -121,12 +121,12 @@ func TestAEGreaterTermMakesReceiverFollower(t *testing.T) {
 	raftSrv.state.currentTerm = 1
 	raftSrv.state.role = RaftRoleLeader
 
-	res := raftSrv.processAppendEntriesRequest(AppendEntriesReq{
+	res := raftSrv.processAppendEntriesRequest(appendEntriesReq{
 		Term:         5,
 		LeaderId:     2,
 		PrevLogIndex: 0,
 		PrevLogTerm:  0,
-		Entries:      []*LogEntry{},
+		Entries:      []*logEntry{},
 		LeaderCommit: 0,
 	})
 
@@ -150,7 +150,7 @@ func TestAEGreaterTermMakesReceiverFollower(t *testing.T) {
 
 func TestAELeaderAppendsFirstLogEntries(t *testing.T) {
 	// Send an AE with first logs and a new term
-	log := []*LogEntry{
+	log := []*logEntry{
 		{Term: 1, Command: []byte{1, 2}},
 		{Term: 1, Command: []byte{3, 4}},
 	}
@@ -159,7 +159,7 @@ func TestAELeaderAppendsFirstLogEntries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
-	res := raftSrv.processAppendEntriesRequest(AppendEntriesReq{
+	res := raftSrv.processAppendEntriesRequest(appendEntriesReq{
 		Term:         1,
 		LeaderId:     2,
 		PrevLogIndex: 0,
@@ -180,14 +180,14 @@ func TestAELeaderAppendsFirstLogEntries(t *testing.T) {
 	if role := raftSrv.Role(); role != RaftRoleFollower {
 		t.Errorf("srv.Role() = %s, want RaftRoleFollower", role)
 	}
-	if diff := cmp.Diff(log, raftSrv.state.log.Entries()); diff != "" {
+	if diff := cmp.Diff(log, raftSrv.state.log.entries()); diff != "" {
 		t.Errorf("log mismatch (-want +got):\n%s", diff)
 	}
 }
 
 func TestAEOutOfDateLeaderDoesNotAppendLogEntries(t *testing.T) {
 	// "Reply false if term < currentTerm (5.1)"
-	log := []*LogEntry{
+	log := []*logEntry{
 		{Term: 1, Command: []byte{1, 2}},
 	}
 
@@ -196,7 +196,7 @@ func TestAEOutOfDateLeaderDoesNotAppendLogEntries(t *testing.T) {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
 	raftSrv.state.currentTerm = 2
-	res := raftSrv.processAppendEntriesRequest(AppendEntriesReq{
+	res := raftSrv.processAppendEntriesRequest(appendEntriesReq{
 		Term:         1, // <currentTerm
 		LeaderId:     2,
 		PrevLogIndex: 0,
@@ -217,7 +217,7 @@ func TestAEOutOfDateLeaderDoesNotAppendLogEntries(t *testing.T) {
 	if role := raftSrv.Role(); role != RaftRoleFollower {
 		t.Errorf("srv.Role() = %s, want RaftRoleFollower", role)
 	}
-	if diff := cmp.Diff([]*LogEntry{}, raftSrv.state.log.Entries()); diff != "" {
+	if diff := cmp.Diff([]*logEntry{}, raftSrv.state.log.entries()); diff != "" {
 		t.Errorf("log mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -225,13 +225,13 @@ func TestAEOutOfDateLeaderDoesNotAppendLogEntries(t *testing.T) {
 func TestAEMatchingprevLogIndexLogDoesAppendLogEntries(t *testing.T) {
 	// "Reply false if log doesn't contain an entry at prevLogIndex
 	// whose term matches prevLogTerm (5.3)"
-	originalLog := []*LogEntry{
+	originalLog := []*logEntry{
 		{Term: 1, Command: []byte{1, 1}},
 		{Term: 1, Command: []byte{1, 2}},
 		{Term: 2, Command: []byte{2, 1}},
 		{Term: 3, Command: []byte{3, 1}},
 	}
-	newEntries := []*LogEntry{
+	newEntries := []*logEntry{
 		{Term: 3, Command: []byte{3, 2}},
 		{Term: 3, Command: []byte{3, 3}},
 		{Term: 4, Command: []byte{3, 3}},
@@ -242,9 +242,9 @@ func TestAEMatchingprevLogIndexLogDoesAppendLogEntries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
-	raftSrv.state.log = RaftLog{originalLog}
+	raftSrv.state.log = raftLog{originalLog}
 	raftSrv.state.currentTerm = originalLog[len(originalLog)-1].Term
-	res := raftSrv.processAppendEntriesRequest(AppendEntriesReq{
+	res := raftSrv.processAppendEntriesRequest(appendEntriesReq{
 		Term:         3,
 		LeaderId:     2,
 		PrevLogIndex: 4, // 1-based
@@ -256,7 +256,7 @@ func TestAEMatchingprevLogIndexLogDoesAppendLogEntries(t *testing.T) {
 	if res.Success != true {
 		t.Errorf("res.Success = %t, want true", res.Success)
 	}
-	if diff := cmp.Diff(expected, raftSrv.state.log.Entries()); diff != "" {
+	if diff := cmp.Diff(expected, raftSrv.state.log.entries()); diff != "" {
 		t.Errorf("log mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -264,13 +264,13 @@ func TestAEMatchingprevLogIndexLogDoesAppendLogEntries(t *testing.T) {
 func TestAEMismatchedprevLogIndexLogDoesntAppend(t *testing.T) {
 	// "Reply false if log doesn't contain an entry at prevLogIndex
 	// whose term matches prevLogTerm (5.3)"
-	originalLog := []*LogEntry{
+	originalLog := []*logEntry{
 		{Term: 1, Command: []byte{1, 1}},
 		{Term: 1, Command: []byte{1, 2}},
 		{Term: 2, Command: []byte{2, 1}},
 		{Term: 3, Command: []byte{3, 1}}, // prevLogIndex=4
 	}
-	newEntries := []*LogEntry{
+	newEntries := []*logEntry{
 		{Term: 3, Command: []byte{3, 2}}, // should not be applied
 	}
 	expected := originalLog
@@ -279,9 +279,9 @@ func TestAEMismatchedprevLogIndexLogDoesntAppend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
-	raftSrv.state.log = RaftLog{originalLog}
+	raftSrv.state.log = raftLog{originalLog}
 	raftSrv.state.currentTerm = originalLog[len(originalLog)-1].Term
-	res := raftSrv.processAppendEntriesRequest(AppendEntriesReq{
+	res := raftSrv.processAppendEntriesRequest(appendEntriesReq{
 		Term:         3,
 		LeaderId:     2,
 		PrevLogIndex: 4, // 1-based
@@ -293,7 +293,7 @@ func TestAEMismatchedprevLogIndexLogDoesntAppend(t *testing.T) {
 	if res.Success != false {
 		t.Errorf("res.Success = %t, want false", res.Success)
 	}
-	if diff := cmp.Diff(expected, raftSrv.state.log.Entries()); diff != "" {
+	if diff := cmp.Diff(expected, raftSrv.state.log.entries()); diff != "" {
 		t.Errorf("log mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -301,13 +301,13 @@ func TestAEMismatchedprevLogIndexLogDoesntAppend(t *testing.T) {
 func TestAEMismatchedLogAtprevLogIndexDoesntAppend(t *testing.T) {
 	// "Reply false if log doesn't contain an entry at prevLogIndex
 	// whose term matches prevLogTerm (5.3)"
-	originalLog := []*LogEntry{
+	originalLog := []*logEntry{
 		{Term: 1, Command: []byte{1, 1}},
 		{Term: 1, Command: []byte{1, 2}},
 		{Term: 2, Command: []byte{2, 1}}, // prevLogIndex=3
 		{Term: 3, Command: []byte{3, 1}},
 	}
-	newEntries := []*LogEntry{
+	newEntries := []*logEntry{
 		{Term: 3, Command: []byte{3, 2}},
 	}
 	expected := originalLog
@@ -316,9 +316,9 @@ func TestAEMismatchedLogAtprevLogIndexDoesntAppend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
-	raftSrv.state.log = RaftLog{originalLog}
+	raftSrv.state.log = raftLog{originalLog}
 	raftSrv.state.currentTerm = originalLog[len(originalLog)-1].Term
-	res := raftSrv.processAppendEntriesRequest(AppendEntriesReq{
+	res := raftSrv.processAppendEntriesRequest(appendEntriesReq{
 		Term:         3,
 		LeaderId:     2,
 		PrevLogIndex: 3, // 1-based
@@ -330,7 +330,7 @@ func TestAEMismatchedLogAtprevLogIndexDoesntAppend(t *testing.T) {
 	if res.Success != false {
 		t.Errorf("res.Success = %t, want false", res.Success)
 	}
-	if diff := cmp.Diff(expected, raftSrv.state.log.Entries()); diff != "" {
+	if diff := cmp.Diff(expected, raftSrv.state.log.entries()); diff != "" {
 		t.Errorf("log mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -338,13 +338,13 @@ func TestAEMismatchedLogAtprevLogIndexDoesntAppend(t *testing.T) {
 func TestAELogAtUnknownprevLogIndexDoesntAppend(t *testing.T) {
 	// "Reply false if log doesn't contain an entry at prevLogIndex
 	// whose term matches prevLogTerm (5.3)"
-	originalLog := []*LogEntry{
+	originalLog := []*logEntry{
 		{Term: 1, Command: []byte{1, 1}},
 		{Term: 1, Command: []byte{1, 2}},
 		{Term: 2, Command: []byte{2, 1}}, // prevLogIndex=3
 		{Term: 3, Command: []byte{3, 1}},
 	}
-	newEntries := []*LogEntry{
+	newEntries := []*logEntry{
 		{Term: 3, Command: []byte{3, 2}},
 	}
 	expected := originalLog
@@ -353,9 +353,9 @@ func TestAELogAtUnknownprevLogIndexDoesntAppend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
-	raftSrv.state.log = RaftLog{originalLog}
+	raftSrv.state.log = raftLog{originalLog}
 	raftSrv.state.currentTerm = originalLog[len(originalLog)-1].Term
-	res := raftSrv.processAppendEntriesRequest(AppendEntriesReq{
+	res := raftSrv.processAppendEntriesRequest(appendEntriesReq{
 		Term:         3,
 		LeaderId:     2,
 		PrevLogIndex: 9, // too high, server doesn't have log to this index
@@ -367,20 +367,20 @@ func TestAELogAtUnknownprevLogIndexDoesntAppend(t *testing.T) {
 	if res.Success != false {
 		t.Errorf("res.Success = %t, want false", res.Success)
 	}
-	if diff := cmp.Diff(expected, raftSrv.state.log.Entries()); diff != "" {
+	if diff := cmp.Diff(expected, raftSrv.state.log.entries()); diff != "" {
 		t.Errorf("log mismatch (-want +got):\n%s", diff)
 	}
 }
 
 func TestAEAppendOnlyNewEntries(t *testing.T) {
 	// "Append any new entries not already in log"
-	originalLog := []*LogEntry{
+	originalLog := []*logEntry{
 		{Term: 1, Command: []byte{1, 1}},
 		{Term: 1, Command: []byte{1, 2}},
 		{Term: 2, Command: []byte{2, 1}}, // 3
 		{Term: 3, Command: []byte{3, 1}}, // 4
 	}
-	newEntries := []*LogEntry{
+	newEntries := []*logEntry{
 		{Term: 2, Command: []byte{2, 1}}, // dup existing 3
 		{Term: 3, Command: []byte{3, 1}}, // dup existing 4
 		{Term: 3, Command: []byte{3, 2}}, // new entries start here
@@ -393,9 +393,9 @@ func TestAEAppendOnlyNewEntries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
-	raftSrv.state.log = RaftLog{originalLog}
+	raftSrv.state.log = raftLog{originalLog}
 	raftSrv.state.currentTerm = originalLog[len(originalLog)-1].Term
-	res := raftSrv.processAppendEntriesRequest(AppendEntriesReq{
+	res := raftSrv.processAppendEntriesRequest(appendEntriesReq{
 		Term:         3,
 		LeaderId:     2,
 		PrevLogIndex: 2,
@@ -407,20 +407,20 @@ func TestAEAppendOnlyNewEntries(t *testing.T) {
 	if res.Success != true {
 		t.Errorf("res.Success = %t, want true", res.Success)
 	}
-	if diff := cmp.Diff(expected, raftSrv.state.log.Entries()); diff != "" {
+	if diff := cmp.Diff(expected, raftSrv.state.log.entries()); diff != "" {
 		t.Errorf("log mismatch (-want +got):\n%s", diff)
 	}
 }
 
 func TestAEAppendOnlyNewEntriesNoNewEntries(t *testing.T) {
 	// "Append any new entries not already in log"
-	originalLog := []*LogEntry{
+	originalLog := []*logEntry{
 		{Term: 1, Command: []byte{1, 1}},
 		{Term: 1, Command: []byte{1, 2}},
 		{Term: 2, Command: []byte{2, 1}}, // 3
 		{Term: 3, Command: []byte{3, 1}}, // 4
 	}
-	newEntries := []*LogEntry{
+	newEntries := []*logEntry{
 		{Term: 2, Command: []byte{2, 1}}, // dup 3
 		{Term: 3, Command: []byte{3, 1}}, // dup 4
 	}
@@ -430,9 +430,9 @@ func TestAEAppendOnlyNewEntriesNoNewEntries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
-	raftSrv.state.log = RaftLog{originalLog}
+	raftSrv.state.log = raftLog{originalLog}
 	raftSrv.state.currentTerm = originalLog[len(originalLog)-1].Term
-	res := raftSrv.processAppendEntriesRequest(AppendEntriesReq{
+	res := raftSrv.processAppendEntriesRequest(appendEntriesReq{
 		Term:         3,
 		LeaderId:     2,
 		PrevLogIndex: 2,
@@ -444,7 +444,7 @@ func TestAEAppendOnlyNewEntriesNoNewEntries(t *testing.T) {
 	if res.Success != true {
 		t.Errorf("res.Success = %t, want true", res.Success)
 	}
-	if diff := cmp.Diff(expected, raftSrv.state.log.Entries()); diff != "" {
+	if diff := cmp.Diff(expected, raftSrv.state.log.entries()); diff != "" {
 		t.Errorf("log mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -453,13 +453,13 @@ func TestAETruncateAndAddAllNewEntries(t *testing.T) {
 	// "If an existing entry conflicts with a new one (same index but
 	// different terms), delete the existing entry and all that follow
 	// it (5.3)"
-	originalLog := []*LogEntry{
+	originalLog := []*logEntry{
 		{Term: 1, Command: []byte{1, 1}}, // valid entry
 		{Term: 1, Command: []byte{1, 2}}, // valid entry // prevLogIndex
 		{Term: 2, Command: []byte{2, 1}}, // truncate
 		{Term: 3, Command: []byte{3, 1}}, // truncate
 	}
-	newEntries := []*LogEntry{
+	newEntries := []*logEntry{
 		{Term: 3, Command: []byte{3, 1}}, // no dup, should add all
 		{Term: 3, Command: []byte{3, 2}},
 		{Term: 3, Command: []byte{3, 3}},
@@ -472,9 +472,9 @@ func TestAETruncateAndAddAllNewEntries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
-	raftSrv.state.log = RaftLog{originalLog}
+	raftSrv.state.log = raftLog{originalLog}
 	raftSrv.state.currentTerm = originalLog[len(originalLog)-1].Term
-	res := raftSrv.processAppendEntriesRequest(AppendEntriesReq{
+	res := raftSrv.processAppendEntriesRequest(appendEntriesReq{
 		Term:         3,
 		LeaderId:     2,
 		PrevLogIndex: 2,
@@ -486,7 +486,7 @@ func TestAETruncateAndAddAllNewEntries(t *testing.T) {
 	if res.Success != true {
 		t.Errorf("res.Success = %t, want true", res.Success)
 	}
-	if diff := cmp.Diff(expected, raftSrv.state.log.Entries()); diff != "" {
+	if diff := cmp.Diff(expected, raftSrv.state.log.entries()); diff != "" {
 		t.Errorf("log mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -495,13 +495,13 @@ func TestAETruncateAndOnlyAddNewEntries(t *testing.T) {
 	// "If an existing entry conflicts with a new one (same index but
 	// different terms), delete the existing entry and all that follow
 	// it (5.3)"
-	originalLog := []*LogEntry{
+	originalLog := []*logEntry{
 		{Term: 1, Command: []byte{1, 1}}, // prevLogIndex
 		{Term: 1, Command: []byte{1, 2}}, // valid entry at 2
 		{Term: 2, Command: []byte{2, 1}}, // truncate
 		{Term: 3, Command: []byte{3, 1}}, // truncate
 	}
-	newEntries := []*LogEntry{
+	newEntries := []*logEntry{
 		{Term: 1, Command: []byte{1, 2}}, // match valid entry at 2
 		{Term: 3, Command: []byte{3, 3}}, // replace truncated
 		{Term: 3, Command: []byte{3, 4}}, // replace truncated
@@ -513,9 +513,9 @@ func TestAETruncateAndOnlyAddNewEntries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
-	raftSrv.state.log = RaftLog{originalLog}
+	raftSrv.state.log = raftLog{originalLog}
 	raftSrv.state.currentTerm = originalLog[len(originalLog)-1].Term
-	res := raftSrv.processAppendEntriesRequest(AppendEntriesReq{
+	res := raftSrv.processAppendEntriesRequest(appendEntriesReq{
 		Term:         3,
 		LeaderId:     2,
 		PrevLogIndex: 1,
@@ -527,7 +527,7 @@ func TestAETruncateAndOnlyAddNewEntries(t *testing.T) {
 	if res.Success != true {
 		t.Errorf("res.Success = %t, want true", res.Success)
 	}
-	if diff := cmp.Diff(expected, raftSrv.state.log.Entries()); diff != "" {
+	if diff := cmp.Diff(expected, raftSrv.state.log.entries()); diff != "" {
 		t.Errorf("log mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -539,7 +539,7 @@ func TestAETruncateAndOnlyAddNewEntries(t *testing.T) {
 func TestAELeaderCommitUpdatesCommitIndex(t *testing.T) {
 	// "If leaderCommit > commitIndex, set commitIndex =
 	// min(leaderCommit, index of last new entry)"
-	originalLog := []*LogEntry{
+	originalLog := []*logEntry{
 		{Term: 1, Command: []byte{1, 1}},
 		{Term: 1, Command: []byte{1, 2}},
 		{Term: 2, Command: []byte{2, 1}},
@@ -550,16 +550,16 @@ func TestAELeaderCommitUpdatesCommitIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
-	raftSrv.state.log = RaftLog{originalLog}
+	raftSrv.state.log = raftLog{originalLog}
 	raftSrv.state.currentTerm = 3
 	raftSrv.state.commitIndex = 0
 
-	res := raftSrv.processAppendEntriesRequest(AppendEntriesReq{
+	res := raftSrv.processAppendEntriesRequest(appendEntriesReq{
 		Term:         3,
 		LeaderId:     2,
 		PrevLogIndex: 4,
 		PrevLogTerm:  3,
-		Entries:      []*LogEntry{},
+		Entries:      []*logEntry{},
 		LeaderCommit: 2,
 	})
 
@@ -575,7 +575,7 @@ func TestAELeaderCommitCappedByLogLength(t *testing.T) {
 	// "If leaderCommit > commitIndex, set commitIndex =
 	// min(leaderCommit, index of last new entry)"
 	// When leaderCommit exceeds our log length, cap at log length.
-	originalLog := []*LogEntry{
+	originalLog := []*logEntry{
 		{Term: 1, Command: []byte{1, 1}},
 		{Term: 1, Command: []byte{1, 2}},
 	}
@@ -584,16 +584,16 @@ func TestAELeaderCommitCappedByLogLength(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
-	raftSrv.state.log = RaftLog{originalLog}
+	raftSrv.state.log = raftLog{originalLog}
 	raftSrv.state.currentTerm = 1
 	raftSrv.state.commitIndex = 0
 
-	res := raftSrv.processAppendEntriesRequest(AppendEntriesReq{
+	res := raftSrv.processAppendEntriesRequest(appendEntriesReq{
 		Term:         1,
 		LeaderId:     2,
 		PrevLogIndex: 2,
 		PrevLogTerm:  1,
-		Entries:      []*LogEntry{},
+		Entries:      []*logEntry{},
 		LeaderCommit: 5, // exceeds log length of 2
 	})
 
@@ -607,7 +607,7 @@ func TestAELeaderCommitCappedByLogLength(t *testing.T) {
 
 func TestAELeaderCommitNotUpdatedWhenLower(t *testing.T) {
 	// "If leaderCommit > commitIndex" -- if not greater, don't update
-	originalLog := []*LogEntry{
+	originalLog := []*logEntry{
 		{Term: 1, Command: []byte{1, 1}},
 		{Term: 1, Command: []byte{1, 2}},
 		{Term: 2, Command: []byte{2, 1}},
@@ -619,16 +619,16 @@ func TestAELeaderCommitNotUpdatedWhenLower(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
-	raftSrv.state.log = RaftLog{originalLog}
+	raftSrv.state.log = raftLog{originalLog}
 	raftSrv.state.currentTerm = 3
 	raftSrv.state.commitIndex = 3
 
-	res := raftSrv.processAppendEntriesRequest(AppendEntriesReq{
+	res := raftSrv.processAppendEntriesRequest(appendEntriesReq{
 		Term:         3,
 		LeaderId:     2,
 		PrevLogIndex: 5,
 		PrevLogTerm:  3,
-		Entries:      []*LogEntry{},
+		Entries:      []*logEntry{},
 		LeaderCommit: 2, // lower than current commitIndex of 3
 	})
 
@@ -650,13 +650,13 @@ func TestAELeaderCommitUpdatedAfterAppendingEntries(t *testing.T) {
 	// Start with empty log
 	raftSrv.state.commitIndex = 0
 
-	newEntries := []*LogEntry{
+	newEntries := []*logEntry{
 		{Term: 1, Command: []byte{1, 1}},
 		{Term: 1, Command: []byte{1, 2}},
 		{Term: 1, Command: []byte{1, 3}},
 	}
 
-	res := raftSrv.processAppendEntriesRequest(AppendEntriesReq{
+	res := raftSrv.processAppendEntriesRequest(appendEntriesReq{
 		Term:         1,
 		LeaderId:     2,
 		PrevLogIndex: 0,
@@ -680,7 +680,7 @@ func TestAELeaderCommitUpdatedAfterAppendingEntries(t *testing.T) {
 
 func TestLogPersistedToStateFile(t *testing.T) {
 	stateDir := t.TempDir()
-	log := []*LogEntry{
+	log := []*logEntry{
 		{Term: 1, Command: []byte{1, 1}},
 		{Term: 1, Command: []byte{1, 2}},
 		{Term: 2, Command: []byte{2, 1}},
@@ -691,12 +691,12 @@ func TestLogPersistedToStateFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRaftServer failed: %v", err)
 	}
-	raftSrv.state.log = RaftLog{log}
+	raftSrv.state.log = raftLog{log}
 	raftSrv.state.currentTerm = 3
 
 	raftSrv.persistState()
 
-	ps, err := LoadPersistentState(stateDir)
+	ps, err := loadPersistentState(stateDir)
 	if err != nil {
 		t.Fatalf("LoadPersistentState failed: %v", err)
 	}
@@ -720,13 +720,13 @@ func TestStateMachineNotAppliedWhenCommitSame(t *testing.T) {
 	// Start with empty log
 	raftSrv.state.commitIndex = 0
 
-	newEntries := []*LogEntry{
+	newEntries := []*logEntry{
 		{Term: 1, Command: []byte{1, 1}},
 		{Term: 1, Command: []byte{1, 2}},
 		{Term: 1, Command: []byte{1, 3}},
 	}
 
-	raftSrv.processAppendEntriesRequest(AppendEntriesReq{
+	raftSrv.processAppendEntriesRequest(appendEntriesReq{
 		Term:         1,
 		LeaderId:     2,
 		PrevLogIndex: 0,
@@ -753,14 +753,14 @@ func TestStateMachineAppliedOnHeartbeat(t *testing.T) {
 	// Start with empty log
 	raftSrv.state.commitIndex = 0
 
-	newEntries := []*LogEntry{
+	newEntries := []*logEntry{
 		{Term: 1, Command: []byte{1, 1}},
 		{Term: 1, Command: []byte{1, 2}},
 		{Term: 1, Command: []byte{1, 3}},
 	}
 
 	// Add entries but do not commit, should not apply
-	raftSrv.processAppendEntriesRequest(AppendEntriesReq{
+	raftSrv.processAppendEntriesRequest(appendEntriesReq{
 		Term:         1,
 		LeaderId:     2,
 		PrevLogIndex: 0,
@@ -773,12 +773,12 @@ func TestStateMachineAppliedOnHeartbeat(t *testing.T) {
 	}
 
 	// Heartbeat with commit
-	raftSrv.processAppendEntriesRequest(AppendEntriesReq{
+	raftSrv.processAppendEntriesRequest(appendEntriesReq{
 		Term:         1,
 		LeaderId:     2,
 		PrevLogIndex: 3,
 		PrevLogTerm:  1,
-		Entries:      []*LogEntry{},
+		Entries:      []*logEntry{},
 		LeaderCommit: 3,
 	})
 	if countingSM.count.Load() != 3 {
@@ -798,14 +798,14 @@ func TestStateMachineAppliedBySequentialHeartbeats(t *testing.T) {
 	// Start with empty log
 	raftSrv.state.commitIndex = 0
 
-	newEntries := []*LogEntry{
+	newEntries := []*logEntry{
 		{Term: 1, Command: []byte{1, 1}},
 		{Term: 1, Command: []byte{1, 2}},
 		{Term: 1, Command: []byte{1, 3}},
 	}
 
 	// Add entries but do not commit, should not apply
-	raftSrv.processAppendEntriesRequest(AppendEntriesReq{
+	raftSrv.processAppendEntriesRequest(appendEntriesReq{
 		Term:         1,
 		LeaderId:     2,
 		PrevLogIndex: 0,
@@ -818,24 +818,24 @@ func TestStateMachineAppliedBySequentialHeartbeats(t *testing.T) {
 	}
 
 	// Heartbeat with commit for first 2 entries
-	raftSrv.processAppendEntriesRequest(AppendEntriesReq{
+	raftSrv.processAppendEntriesRequest(appendEntriesReq{
 		Term:         1,
 		LeaderId:     2,
 		PrevLogIndex: 3,
 		PrevLogTerm:  1,
-		Entries:      []*LogEntry{},
+		Entries:      []*logEntry{},
 		LeaderCommit: 2,
 	})
 	if countingSM.count.Load() != 2 {
 		t.Errorf("countingSM.count = %d, want 2", countingSM.count.Load())
 	}
 	// Heartbeat with commit for last entry
-	raftSrv.processAppendEntriesRequest(AppendEntriesReq{
+	raftSrv.processAppendEntriesRequest(appendEntriesReq{
 		Term:         1,
 		LeaderId:     2,
 		PrevLogIndex: 3,
 		PrevLogTerm:  1,
-		Entries:      []*LogEntry{},
+		Entries:      []*logEntry{},
 		LeaderCommit: 3,
 	})
 	if countingSM.count.Load() != 3 {
@@ -857,13 +857,13 @@ func TestStateMachineAppliedWhenCommitAdvances(t *testing.T) {
 	// Start with empty log
 	raftSrv.state.commitIndex = 0
 
-	newEntries := []*LogEntry{
+	newEntries := []*logEntry{
 		{Term: 1, Command: []byte{1, 1}},
 		{Term: 1, Command: []byte{1, 2}},
 		{Term: 1, Command: []byte{1, 3}},
 	}
 
-	raftSrv.processAppendEntriesRequest(AppendEntriesReq{
+	raftSrv.processAppendEntriesRequest(appendEntriesReq{
 		Term:         1,
 		LeaderId:     2,
 		PrevLogIndex: 0,

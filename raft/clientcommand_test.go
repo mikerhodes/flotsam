@@ -35,19 +35,19 @@ type countingAETransport struct {
 
 // makeRequestVoteRequest returns a hardcoded vote.
 func (r *countingAETransport) makeRequestVoteRequest(
-	_ context.Context, _ ServerId, requestVote RequestVoteReq,
-) (*RequestVoteRes, error) {
-	return &RequestVoteRes{Term: requestVote.Term, VoteGranted: false}, nil
+	_ context.Context, _ ServerId, requestVote requestVoteReq,
+) (*requestVoteRes, error) {
+	return &requestVoteRes{Term: requestVote.Term, VoteGranted: false}, nil
 }
 
 // makeHeartbeatRequest counts sent AE requests
 func (r *countingAETransport) makeHeartbeatRequest(
-	_ context.Context, _ ServerId, appendEntries AppendEntriesReq,
-) (*AppendEntriesRes, error) {
+	_ context.Context, _ ServerId, appendEntries appendEntriesReq,
+) (*appendEntriesRes, error) {
 	r.Lock()
 	defer r.Unlock()
 	r.receivedAERequests++
-	return &AppendEntriesRes{Term: appendEntries.Term, Success: true}, nil
+	return &appendEntriesRes{Term: appendEntries.Term, Success: true}, nil
 }
 
 //
@@ -125,7 +125,7 @@ func TestWritingSingleCommandToPeers(t *testing.T) {
 			t.Errorf("mockC.receivedAERequests = %d, want %d",
 				mockC.receivedAERequests, nPeers)
 		}
-		if diff := cmp.Diff([]*LogEntry{{
+		if diff := cmp.Diff([]*logEntry{{
 			Term:    1,
 			Command: []byte{1, 2, 3},
 		}}, raftSrv.state.log.log); diff != "" {
@@ -179,11 +179,11 @@ func TestWritingManyCommandsToPeers(t *testing.T) {
 				mockC.receivedAERequests, nPeers*int(writes))
 		}
 		if diff := cmp.Diff(
-			slices.Repeat([]*LogEntry{{Term: 1, Command: []byte{1}}}, int(writes)),
+			slices.Repeat([]*logEntry{{Term: 1, Command: []byte{1}}}, int(writes)),
 			raftSrv.state.log.log); diff != "" {
 			t.Errorf("log mismatch (-want +got):\n%s", diff)
 		}
-		if raftSrv.state.commitIndex != LogIndex(writes) {
+		if raftSrv.state.commitIndex != logIndex(writes) {
 			t.Errorf("commitIndex == %d, wanted %d", raftSrv.state.commitIndex, writes)
 		}
 		if countingSM.count.Load() != writes {

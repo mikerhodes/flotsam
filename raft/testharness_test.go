@@ -151,7 +151,7 @@ func (h *Harness) PersistentStates(
 ) iter.Seq2[ServerId, persistentState] {
 	return func(yield func(ServerId, persistentState) bool) {
 		for id, stateDir := range h.stateDirs {
-			ps, err := LoadPersistentState(stateDir)
+			ps, err := loadPersistentState(stateDir)
 			if err != nil {
 				t.Fatalf("Failed to load persistent state for server %d: %v", id, err)
 			}

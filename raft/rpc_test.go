@@ -7,9 +7,9 @@ import (
 
 func Test_maybeUpdatedCommitIndex(t *testing.T) {
 	// genLog returns a log that ends at term t with length l
-	genLog := func(t Term, l int) *RaftLog {
-		return &RaftLog{
-			log: slices.Repeat([]*LogEntry{{Term: t, Command: []byte{}}}, l),
+	genLog := func(t Term, l int) *raftLog {
+		return &raftLog{
+			log: slices.Repeat([]*logEntry{{Term: t, Command: []byte{}}}, l),
 		}
 	}
 	// term is used for the term in all tests
@@ -22,52 +22,52 @@ func Test_maybeUpdatedCommitIndex(t *testing.T) {
 	// 3. raftLog for this server ends with entry matching current term
 	tests := []struct {
 		name               string
-		currentCommitIndex LogIndex
-		matchIndex         map[ServerId]LogIndex
-		raftLog            *RaftLog
-		wantCommitIndex    LogIndex
+		currentCommitIndex logIndex
+		matchIndex         map[ServerId]logIndex
+		raftLog            *raftLog
+		wantCommitIndex    logIndex
 	}{
 		{
 			name:               "lower majority does not advance",
 			currentCommitIndex: 3,
-			matchIndex:         map[ServerId]LogIndex{1: 2, 2: 1},
+			matchIndex:         map[ServerId]logIndex{1: 2, 2: 1},
 			raftLog:            genLog(term, 5),
 			wantCommitIndex:    3,
 		}, {
 			name:               "majority reached furthest log index advances",
 			currentCommitIndex: 1,
-			matchIndex:         map[ServerId]LogIndex{1: 3, 2: 5},
+			matchIndex:         map[ServerId]logIndex{1: 3, 2: 5},
 			raftLog:            genLog(term, 5),
 			wantCommitIndex:    5,
 		}, {
 			name:               "majority higher than current index advances",
 			currentCommitIndex: 1,
-			matchIndex:         map[ServerId]LogIndex{1: 3, 2: 4},
+			matchIndex:         map[ServerId]logIndex{1: 3, 2: 4},
 			raftLog:            genLog(term, 5), // higher than durable elsewhere
 			wantCommitIndex:    4,
 		}, {
 			name:               "lower N than current index does not advance",
 			currentCommitIndex: 4,
-			matchIndex:         map[ServerId]LogIndex{1: 3, 2: 3}, // 3 < 4
+			matchIndex:         map[ServerId]logIndex{1: 3, 2: 3}, // 3 < 4
 			raftLog:            genLog(term, 5),
 			wantCommitIndex:    4,
 		}, {
 			name:               "old term for log[N] does not advance",
 			currentCommitIndex: 1,
-			matchIndex:         map[ServerId]LogIndex{1: 5, 2: 5},
+			matchIndex:         map[ServerId]logIndex{1: 5, 2: 5},
 			raftLog:            genLog(term-12, 5), // local log with older term
 			wantCommitIndex:    1,
 		}, {
 			name:               "newer term for log[N] does not advance",
 			currentCommitIndex: 1,
-			matchIndex:         map[ServerId]LogIndex{1: 5, 2: 5},
+			matchIndex:         map[ServerId]logIndex{1: 5, 2: 5},
 			raftLog:            genLog(term+12, 5), // local log with newer term
 			wantCommitIndex:    1,
 		}, {
 			// Raft should guarantee this never happens
 			name:               "other servers beyond log len does not advance",
 			currentCommitIndex: 1,
-			matchIndex:         map[ServerId]LogIndex{1: 100, 2: 100},
+			matchIndex:         map[ServerId]logIndex{1: 100, 2: 100},
 			raftLog:            genLog(term, 5), // much shorter than peer logs
 			wantCommitIndex:    1,
 		},
