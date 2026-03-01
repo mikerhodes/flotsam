@@ -1,6 +1,6 @@
 # Flotsam
 
-Flotsam is an implementation of Raft that I wrote to learn Raft.
+Flotsam is an implementation of Raft that I am writing to learn Raft.
 
 Progress:
 
@@ -21,3 +21,5 @@ particularly when it's a learning experience.
 
 Saying that, CLAUDE.md is a reasonable guide to the code if you are
 interested.
+
+I also used Claude to help refine methods --- flag up opportunities to improve readability and so on.
